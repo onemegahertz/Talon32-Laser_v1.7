@@ -161,6 +161,11 @@ export default function FirmwareSection() {
               >
                 {copied ? "✓ Скопировано" : "Копировать в буфер"}
               </button>
+              <p className="mt-3 border border-amber/35 bg-amber/[0.06] px-3 py-2.5 font-mono text-[10.5px] leading-relaxed text-amber/90">
+                Контроль чистоты артефакта: перед скачиванием из текста автоматически вырезаются
+                обратные кавычки и служебные символы JS-шаблона — в Arduino IDE попадает только
+                валидный C++. Для прошивки берите файл, скачанный этой кнопкой.
+              </p>
             </div>
           </Reveal>
 
