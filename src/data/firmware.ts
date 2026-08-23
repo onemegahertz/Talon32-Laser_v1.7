@@ -889,8 +889,25 @@ void handleCard(const String& uid) {
 }
 
 void rfidTick() {
-  if (!rfid.PICC_IsNewCardPresent()) return;
-  if (!rfid.PICC_ReadCardSerial()) return;
+  /* НИЗКОУРОВНЕВОЕ чтение карты вместо обёрток
+   * PICC_IsNewCardPresent() / PICC_ReadCardSerial().
+   * Эти две «удобные» функции ОТСУТСТВУЮТ в части сборок библиотеки
+   * MFRC522 из Library Manager (ошибка компиляции:
+   *   'class MFRC522' has no member named 'PICC_IsNewCardPresent').
+   * PICC_RequestA + PICC_Select + PCD_WriteRegister присутствуют в
+   * КАЖДОЙ версии библиотеки, поэтому скетч собирается с любой
+   * установленной копией. Ниже — ТОЧНОЕ повторение логики штатных
+   * обёрток: сброс регистров скорости, REQA (карта считается найденной
+   * при STATUS_OK И STATUS_COLLISION), затем антиколлизия и выбор
+   * карты с записью UID в rfid.uid.                                    */
+  rfid.PCD_WriteRegister(MFRC522::TxModeReg, 0x00);   // сброс скоростей,
+  rfid.PCD_WriteRegister(MFRC522::RxModeReg, 0x00);   // как в штатной обёртке
+  rfid.PCD_WriteRegister(MFRC522::ModWidthReg, 0x26);
+  byte atqa[2];
+  byte atqaLen = sizeof(atqa);
+  MFRC522::StatusCode rc = rfid.PICC_RequestA(atqa, &atqaLen);
+  if (rc != MFRC522::STATUS_OK && rc != MFRC522::STATUS_COLLISION) return;
+  if (rfid.PICC_Select(&rfid.uid) != MFRC522::STATUS_OK) return;
   String uid = uidToHex(rfid.uid.uidByte, rfid.uid.size);
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
