@@ -52,8 +52,8 @@ export default function Opening({ onDownload }: { onDownload: () => void }) {
     const date = pad2(d.getDate()) + "." + pad2(d.getMonth() + 1) + "." + d.getFullYear();
     let a = "", b = "";
     switch (screen) {
-      case 0: a = date; b = t + " STA:OK"; break;
-      case 1: a = "IP:192.168.1.77"; b = "NET:Hotel_Guest"; break;
+      case 0: a = date; b = t + " ETH:OK"; break;
+      case 1: a = "ETH:192.168.1.77"; b = "КАБЕЛЬ: LINK OK"; break;
       case 2:
         a = period ? period.name.toUpperCase().slice(0, 7) + " " + period.from : "ВНЕ ПЕРИОДА";
         b = "СЕГОДНЯ:" + log.filter((l) => l.kind === "ok").length + "Г";

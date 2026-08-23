@@ -465,8 +465,26 @@ export default function AdminPanel() {
                       <input defaultValue="Hotel_Guest" className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos" />
                       <label className="mt-2 block text-[10px] uppercase tracking-widest text-fog">Пароль (пусто = не менять)</label>
                       <input type="password" placeholder="••••••••" className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none placeholder:text-fog/40 focus:border-phos" />
-                      <p className="mt-2 text-[11px] leading-relaxed text-fog">При потере сети — автопереподключение; через 15 с безуспешных попыток поднимается точка <span className="font-mono text-amber">Talon32-Setup</span>, LCD сообщает об этом.</p>
+                      <p className="mt-2 text-[11px] leading-relaxed text-fog">При потере сети — автопереподключение; через 15 с безуспешных попыток поднимается точка <span className="font-mono text-amber">Talon32-Setup</span> с WPA2-паролем — LCD сообщает имя точки и пароль.</p>
                       <button onClick={() => say("Wi-Fi сохранён, идёт переподключение (демо)")} className="btn-phos mt-3 border border-line2 px-4 py-2 font-mono text-[11px] font-bold uppercase text-snow hover:border-fog">Сохранить сеть</button>
+                    </div>
+                    <div className="border border-line bg-panel2/70 p-4">
+                      <h4 className="font-display text-xs font-bold uppercase tracking-wider" style={{ color: "#c792ea" }}>Ethernet W5500 и точка доступа</h4>
+                      <label className="mt-3 block text-[10px] uppercase tracking-widest text-fog">Основной канал</label>
+                      <select className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos">
+                        <option>Авто: Ethernet → Wi-Fi → точка</option>
+                        <option>Только Wi-Fi</option>
+                        <option>Только Ethernet (фолбэк на Wi-Fi)</option>
+                      </select>
+                      <label className="mt-2 block text-[10px] uppercase tracking-widest text-fog">Адрес Ethernet</label>
+                      <select className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos">
+                        <option>DHCP (автоматически)</option>
+                        <option>Статический: 192.168.1.77 / 255.255.255.0 / 192.168.1.1</option>
+                      </select>
+                      <label className="mt-2 block text-[10px] uppercase tracking-widest text-fog">Пароль точки доступа (8–63 символа)</label>
+                      <input type="password" defaultValue="talon3232" className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos" />
+                      <p className="mt-2 text-[11px] leading-relaxed text-fog">Смена канала и статики применяется перезагрузкой — терминал делает её сам. При ошибке Ethernet автоматически включается Wi-Fi, затем точка доступа.</p>
+                      <button onClick={() => say("Сохранено. Терминал перезагружается для применения (демо)")} className="btn-phos mt-3 border border-line2 px-4 py-2 font-mono text-[11px] font-bold uppercase text-snow hover:border-fog">Сохранить</button>
                     </div>
                     <div className="border border-line bg-panel2/70 p-4">
                       <h4 className="font-display text-xs font-bold uppercase tracking-wider text-snow">Сверка терминалов и время</h4>

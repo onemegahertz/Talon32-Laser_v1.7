@@ -33,7 +33,8 @@ export default function Docs() {
         <Reveal delay={120} className="mt-6">
           <div className="border border-line bg-panel2/60 px-5 py-4 font-mono text-[12px] leading-relaxed text-fog">
             <span className="text-amber">Совет:</span> зарезервируйте за терминалами статические IP в роутере (например .77 и .78) —
-            так сверка залов и закладки админ-панели не «поедут» после перезагрузки роутера.
+            либо задайте статику прямо на терминалах (вкладка «Сеть» → Ethernet W5500). Так сверка залов и закладки
+            админ-панели не «поедут» после перезагрузки роутера.
           </div>
         </Reveal>
       </section>
@@ -105,11 +106,11 @@ export default function Docs() {
                 ТАЛОН-32 <span className="font-mono text-sm font-bold text-phos">v1.7</span>
               </div>
               <p className="mt-2 max-w-sm text-[12.5px] leading-relaxed text-fog">
-                RFID-учёт посетителей столовой и ресторана: ESP32 Dev Module · RC522 · LCD 1602 I2C · DS3231 ·
-                лазерный рубеж · Arduino Core 3.x.
+                RFID-учёт посетителей столовой и ресторана: ESP32 Dev Module · RC522 · Ethernet W5500 ·
+                LCD 1602 I2C (hd44780) · DS3231 · лазерный рубеж · Arduino Core 3.x.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
-                {["Arduino Core 3.x", "LittleFS", "ArduinoJson v7", "SNTP", "SMTP2GO", "Telegram Bot API"].map((t) => (
+                {["Arduino Core 3.x", "Ethernet W5500", "hd44780", "LittleFS", "ArduinoJson v7", "SNTP", "SMTP2GO", "Telegram Bot API"].map((t) => (
                   <span key={t} className="border border-line px-2 py-1 font-mono text-[10px] text-fog">{t}</span>
                 ))}
               </div>

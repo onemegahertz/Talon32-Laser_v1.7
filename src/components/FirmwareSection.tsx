@@ -170,7 +170,7 @@ export default function FirmwareSection() {
               <ul className="mt-3 space-y-2.5 text-[12.5px]">
                 {[
                   ["MFRC522", "miguelbalboa · RFID-считыватель"],
-                  ["LiquidCrystal I2C", "marcoschwartz · LCD1602"],
+                  ["hd44780", "Bill Perry · LCD1602 (I2C, авто-адрес)"],
                   ["RTClib", "Adafruit · DS3231"],
                   ["ArduinoJson", "B. Blanchon · v7"],
                 ].map(([n, d]) => (
@@ -189,9 +189,12 @@ export default function FirmwareSection() {
               <ul className="mt-3 space-y-2 text-[12px] leading-relaxed text-fog">
                 <li><span className="text-phos">▪</span> SPI.begin(18, 19, 23) — явно: в 3.x сменились пины шины по умолчанию</li>
                 <li><span className="text-phos">▪</span> Wire.begin(21, 22) — явно для LCD и DS3231</li>
+                <li><span className="text-phos">▪</span> ETH.begin(ETH_PHY_W5500, …, SPI2_HOST, 17, 12, 16) — W5500 на HSPI, встроенная библиотека ETH</li>
+                <li><span className="text-phos">▪</span> hd44780_I2Cexp: lcd.begin(16, 2) со статусом — lcd.init() из LiquidCrystal_I2C здесь не существует</li>
                 <li><span className="text-phos">▪</span> LittleFS вместо SPIFFS (журнал по дням)</li>
                 <li><span className="text-phos">▪</span> JsonDocument без размера — API ArduinoJson v7</li>
                 <li><span className="text-phos">▪</span> без tone()/ledc — активный buzzer через планировщик</li>
+                <li><span className="text-phos">▪</span> без max()/min() — regLeft и экспонента повтора AP на явных сравнениях</li>
               </ul>
             </div>
           </Reveal>
@@ -200,7 +203,7 @@ export default function FirmwareSection() {
             <div className="border border-line bg-panel p-5">
               <h3 className="font-display text-xs font-bold uppercase tracking-wider text-snow">Внутри прошивки</h3>
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {["Web-панель (пароль)", "AP-резерв Talon32-Setup", "SNTP + DS3231", "HTTP-сверка залов", "Telegram getUpdates", "SMTP2GO e-mail", "JSONL-журнал", "отчёты HTML/CSV/TXT", "режим регистрации 30 с", "антиповтор 3 с"].map((t) => (
+                {["Ethernet W5500 + фолбэк", "Web-панель (пароль)", "WPA2-точка Talon32-Setup", "DHCP / статический IP", "SNTP + DS3231", "HTTP-сверка залов", "Telegram getUpdates", "SMTP2GO e-mail", "JSONL-журнал", "отчёты HTML/CSV/TXT", "режим регистрации 30 с", "антиповтор 3 с"].map((t) => (
                   <span key={t} className="border border-line px-2 py-1 font-mono text-[10px] text-fog">{t}</span>
                 ))}
               </div>
@@ -231,8 +234,8 @@ export default function FirmwareSection() {
           index="03.1"
           kicker="Работа над ошибками"
           tone="alarm"
-          title={<>Шесть дефектов прошлых версий — закрыты</>}
-          lead="Каждое замечание из ревизии превращено в конкретное решение в коде. Ниже — «было / стало» по пунктам; те же комментарии вшиты прямо в прошивку."
+          title={<>Девять дефектов прошлых версий — закрыты</>}
+          lead="Каждое замечание из ревизии превращено в конкретное решение в коде — включая новые: Ethernet-контур, «стирающиеся» поля ввода, regLeft без max() и пароль точки доступа. Ниже — «было / стало» по пунктам; те же комментарии вшиты прямо в прошивку."
         />
         <div className="grid gap-5 md:grid-cols-2">
           {FIXES.map((f, i) => (
@@ -260,11 +263,14 @@ export default function FirmwareSection() {
         </div>
         <Reveal delay={120} className="mt-8">
           <div className="flex flex-wrap items-center gap-4 border border-line bg-panel2/60 px-5 py-4">
-            <Kicker tone="amber">дополнительно в v1.7</Kicker>
+            <Kicker tone="amber">дополнительно в v1.7 · rev W5500</Kicker>
             <p className="max-w-3xl text-[13px] leading-relaxed text-fog">
               LCD перерисовывается только при смене контента (без мерцания), Wi-Fi-переподключение с экспоненциальным
               интервалом до 5 минут, пароль сети не затирается пустым полем, лазер калибруется при старте,
-              суточный отчёт уходит строго один раз в сутки.
+              суточный отчёт уходит строго один раз в сутки. В сборке rev W5500: драйвер LCD hd44780 (адрес определяется
+              автоматически, битый экран не вешает шину), точка доступа под WPA2-паролем из админ-панели,
+              функции initEthernet()/checkEthernet()/getLocalIP(), режимы «Авто / Wi-Fi / Ethernet» с сохранением в NVS,
+              фолбэк Ethernet → Wi-Fi → точка и валидация статических IP-адресов.
             </p>
           </div>
         </Reveal>

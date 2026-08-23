@@ -1,4 +1,7 @@
 // Полный исходник прошивки «Талон-32 v1.7» для ESP32 Dev Module (Arduino Core 3.x).
+// Сборка rev W5500: добавлен Ethernet W5500 (HSPI), драйвер LCD hd44780, WPA2-пароль
+// точки доступа, режимы сети со статическим IP и автофолбэком, исправлен regLeft и
+// «стирание» символов в полях ввода веб-панели. Рабочая логика v1.7 сохранена без изменений.
 // Строка экспортируется как есть (String.raw) для отображения, копирования и скачивания .ino.
 
 export const FIRMWARE_FILE = "Talon32.ino";
@@ -6,25 +9,54 @@ export const FIRMWARE_VERSION = "1.7";
 
 export const FIRMWARE_CODE = String.raw`/*
  * ============================================================
- *  ТАЛОН-32  v1.7  —  RFID-учёт посетителей столовой/ресторана
+ *  ТАЛОН-32  v1.7  (rev W5500)
+ *  RFID-учёт посетителей столовой/ресторана
  *  Платформа : ESP32 Dev Module, Arduino Core 3.x (Espressif)
- *  Периферия : RC522 (SPI), LCD1602 I2C, RTC DS3231, лазерный
+ *  Периферия : RC522 (VSPI 18/19/23), LCD1602 I2C (hd44780,
+ *              автоопределение адреса), RTC DS3231, Ethernet
+ *              W5500 (HSPI: SCK17/MISO12/MOSI16/CS15), лазерный
  *              рубеж (KY-008 + фотоприёмник), LED x3, buzzer,
  *              кнопка регистрации карт.
- *  Связь     : Wi-Fi STA (автопереподключение) -> резерв AP
- *              "Talon32-Setup", веб админ-панель (пароль),
- *              SNTP, Telegram-бот (CSV-отчёты), SMTP2GO e-mail.
+ *  Связь     : Ethernet W5500 (DHCP/статика) -> Wi-Fi STA
+ *              (автопереподключение) -> резервная точка доступа
+ *              "Talon32-Setup" С WPA2-паролем; режимы «Авто»,
+ *              «Только Wi-Fi», «Только Ethernet» (сохраняются в
+ *              NVS, при ошибке Ethernet — автофолбэк на Wi-Fi);
+ *              веб админ-панель (пароль), SNTP, Telegram-бот
+ *              (CSV-отчёты), SMTP2GO e-mail.
  *  Хранение  : NVS (настройки) + LittleFS (журнал по дням).
  *
  *  БИБЛИОТЕКИ (Library Manager):
  *    1) MFRC522            (miguelbalboa)
- *    2) LiquidCrystal I2C  (marcoschwartz)
+ *    2) hd44780            (Bill Perry) — LCD через I2C-переходник:
+ *       адрес и конфигурация переходника определяются автоматически
  *    3) RTClib             (Adafruit)
  *    4) ArduinoJson        (Benoit Blanchon, v7)
+ *  Встроено в ядро: WiFi, WebServer, DNSServer, ETH (W5500),
+ *  Preferences, LittleFS.
  *
  *  ВАЖНО ДЛЯ CORE 3.x: SPI и I2C инициализируются ЯВНО
  *  (SPI.begin(18,19,23), Wire.begin(21,22)) — в Core 3.x
  *  сменились SPI-пины по умолчанию, без этого RC522 молчит.
+ *
+ *  НОВОЕ В СБОРКЕ rev W5500 (рабочая логика v1.7 не тронута):
+ *    + Ethernet W5500: функции initEthernet() / checkEthernet() /
+ *      getLocalIP(), режимы Авто/Wi-Fi/Ethernet, DHCP и статический
+ *      IP, автофолбэк Ethernet -> Wi-Fi -> точка доступа, режим
+ *      подключения сохраняется в NVS;
+ *    + драйвер LCD hd44780 (hd44780_I2Cexp) вместо LiquidCrystal_I2C:
+ *      адрес 0x27/0x3F угадывать больше не нужно. В hd44780 нет
+ *      lcd.init() — корректный запуск lcd.begin(cols, rows) с
+ *      проверкой возвращаемого статуса (0 = OK);
+ *    + точка доступа Talon32-Setup теперь под WPA2-паролем, пароль
+ *      задаётся в админ-панели (минимум 8 символов);
+ *    + фикс «стираются буквы» в полях SSID/пароля: атрибуты
+ *      autocomplete/autocorrect/autocapitalize/spellcheck отключены,
+ *      автообновление статуса больше не перезаписывает поля ввода
+ *      (заполнение только при входе и только вне фокуса);
+ *    + regLeft считается БЕЗ max(): сравнение ДО вычитания — нет
+ *      ни конфликта макросов, ни unsigned-«заворота» после истечения
+ *      таймера; макрос min() из экспоненты повтора AP тоже убран.
  * ============================================================
  */
 
@@ -37,9 +69,11 @@ export const FIRMWARE_CODE = String.raw`/*
 #include <time.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <ETH.h>
 #include <vector>
 #include <MFRC522.h>
-#include <LiquidCrystal_I2C.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_I2Cexp.h>
 #include <RTClib.h>
 #include <ArduinoJson.h>
 
@@ -47,25 +81,30 @@ export const FIRMWARE_CODE = String.raw`/*
 static const char* FW_VERSION   = "1.7";
 static const char* DEVICE_NAME  = "ТАЛОН-32";
 static const char* AP_SSID      = "Talon32-Setup";   // резервная точка доступа
+static const char* DEFAULT_AP_PASS = "talon3232";    // штатный WPA2-пароль точки (8+ символов)
 static const char* DEFAULT_PASS = "admin";           // пароль админ-панели при первом входе
 static const char* DEFAULT_PEER_KEY = "talon-peer-key"; // ключ межтерминального обмена
 
 // --- Пины (ESP32 Dev Module) ---
 static const int PIN_RFID_SS   = 5;
 static const int PIN_RFID_RST  = 4;
-static const int PIN_SPI_SCK   = 18;
+static const int PIN_SPI_SCK   = 18;   // VSPI — только RC522
 static const int PIN_SPI_MISO  = 19;
 static const int PIN_SPI_MOSI  = 23;
+static const int PIN_ETH_SCK   = 17;   // HSPI (SPI2_HOST) — только W5500
+static const int PIN_ETH_MISO  = 12;
+static const int PIN_ETH_MOSI  = 16;
+static const int PIN_ETH_CS    = 15;   // RST и INT модуля не используем (-1):
+                                       // на большинстве плат W5500 есть своя RC-цепь сброса
 static const int PIN_I2C_SDA   = 21;
 static const int PIN_I2C_SCL   = 22;
-static const int LCD_I2C_ADDR  = 0x27;   // если экран молчит — поставьте 0x3F
-static const int PIN_LASER_TX  = 25;     // питание лазерного излучателя
-static const int PIN_LASER_RX  = 32;     // DO фотоприёмника (компаратор LM393)
+static const int PIN_LASER_TX  = 25;   // питание лазерного излучателя
+static const int PIN_LASER_RX  = 32;   // DO фотоприёмника (компаратор LM393)
 static const int PIN_LED_GREEN = 26;
 static const int PIN_LED_RED   = 27;
 static const int PIN_LED_AMBER = 14;
-static const int PIN_BUZZER    = 13;     // АКТИВНЫЙ buzzer (сам звучит)
-static const int PIN_BTN_REG   = 33;     // кнопка: режим регистрации карт
+static const int PIN_BUZZER    = 13;   // АКТИВНЫЙ buzzer (сам звучит)
+static const int PIN_BTN_REG   = 33;   // кнопка: режим регистрации карт
 
 // --- Тайминги ---
 static const uint32_t LASER_GRACE_MS = 20000; // луч выключен после прохода карты, не более 20 с
@@ -77,13 +116,18 @@ static const uint32_t SESSION_MS     = 8UL * 3600UL * 1000UL; // сессия а
 // ======================= ГЛОБАЛЬНЫЕ ==========================
 Preferences   prefs;
 RTC_DS3231    rtc;
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
+hd44780_I2Cexp lcd;                    // адрес и чип переходника определит сама
+bool          g_lcdOk = false;
 MFRC522       rfid(PIN_RFID_SS, PIN_RFID_RST);
 WebServer     server(80);
 DNSServer     dns;
 
 // --- Настройки (NVS) ---
 String   g_ssid, g_pass;                 // Wi-Fi
+String   g_apPass   = DEFAULT_AP_PASS;   // WPA2-пароль резервной точки доступа
+uint8_t  g_netPref  = 0;                 // 0=Авто(Ethernet->Wi-Fi->AP), 1=Wi-Fi, 2=Ethernet
+bool     g_ethStatic = false;            // статический IP для Ethernet
+String   g_eIp, g_eGw, g_eSn;            // Ethernet: ip / шлюз / маска
 String   g_adminPass  = DEFAULT_PASS;
 String   g_tgToken, g_tgChat;            // Telegram
 String   g_smtpKey, g_senderEmail, g_emailTo; // e-mail (SMTP2GO)
@@ -119,9 +163,12 @@ bool     g_sentDaily = false;
 uint32_t g_lastRtcSync = 0;
 
 // --- Сеть ---
-enum NetMode { NET_STA_TRY, NET_STA_ON, NET_AP };
+enum NetMode { NET_ETH_TRY, NET_ETH_ON, NET_STA_TRY, NET_STA_ON, NET_AP };
 NetMode  g_net = NET_STA_TRY;
 uint32_t g_netT0 = 0, g_netNext = 0, g_apBackoff = 15000;
+bool     g_ethStarted = false;           // драйвер W5500 поднят (один раз за загрузку)
+uint32_t g_ethT0 = 0;                    // старт попытки Ethernet
+uint32_t g_ethLostT0 = 0;                // момент потери линка Ethernet
 bool     g_sntpOk = false;
 bool     g_peerSeen = false;
 uint32_t g_netRestartAt = 0, g_rebootAt = 0;
@@ -149,6 +196,11 @@ long     g_tgOffset = 0;
 void syncRtcFromNet(bool force);
 String buildReport(const String& fromS, const String& toS, const String& fmt);
 bool beamBlocked();
+bool netOnline();
+IPAddress getLocalIP();
+void initEthernet();
+bool checkEthernet();
+void startNet();
 
 // ================== НЕБЛОКИРУЮЩИЙ ЗВУК =======================
 /* Паттерны: пары (вкл, выкл) в мс. Явные паузы гарантируют,
@@ -323,9 +375,10 @@ bool localVisited(const String& uid, int p) {
 
 // ============== МЕЖТЕРМИНАЛЬНАЯ СВЕРКА (HTTP) ================
 /* Второй терминал опрашивается ДО вынесения вердикта: гость не
- * сможет «обмануть» систему, сходив сначала в столовую.        */
+ * сможет «обмануть» систему, сходив сначала в столовую.
+ * Работает и по Wi-Fi, и по Ethernet (оба — LwIP).            */
 bool peerVisited(const String& uid, int p, const String& dateStr) {
-  if (g_peerIp.length() < 7 || g_net != NET_STA_ON) return false;
+  if (g_peerIp.length() < 7 || !netOnline()) return false;
   WiFiClient c;
   if (!c.connect(g_peerIp.c_str(), 80)) { g_peerSeen = false; return false; }
   g_peerSeen = true;
@@ -402,6 +455,12 @@ void loadSettings() {
   prefs.begin("talon32", false);
   g_ssid        = prefs.getString("ssid", "");
   g_pass        = prefs.getString("pass", "");
+  g_apPass      = prefs.getString("appass", DEFAULT_AP_PASS);
+  g_netPref     = prefs.getUChar("netpref", 0);
+  g_ethStatic   = prefs.getUChar("estatic", 0) != 0;
+  g_eIp         = prefs.getString("eip", "");
+  g_eGw         = prefs.getString("egw", "");
+  g_eSn         = prefs.getString("esn", "");
   g_adminPass   = prefs.getString("adminpass", DEFAULT_PASS);
   g_tgToken     = prefs.getString("tgtoken", "");
   g_tgChat      = prefs.getString("tgchat", "");
@@ -446,6 +505,7 @@ void lcdShow(const String& l1, const String& l2, uint32_t ms) {
   g_lcdOvrUntil = millis() + ms;
 }
 void lcdDraw() {
+  if (!g_lcdOk) return;                    // экрана нет — не гоняем пустую шину
   String a, b;
   if (g_lcdOvrUntil && (int32_t)(millis() - g_lcdOvrUntil) < 0) {
     a = g_lcdOvr1; b = g_lcdOvr2;
@@ -459,19 +519,24 @@ void lcdDraw() {
                    WEEKDAYS_RU[dt.dayOfTheWeek() % 7]);
           a = l;
           snprintf(l, sizeof(l), "%02d:%02d:%02d %s", dt.hour(), dt.minute(), dt.second(),
-                   g_net == NET_STA_ON ? "STA:OK" : (g_net == NET_AP ? "AP" : "..."));
+                   g_net == NET_STA_ON ? "STA:OK" :
+                   g_net == NET_ETH_ON ? "ETH:OK" :
+                   g_net == NET_AP     ? "AP"     : "...");
           b = l;
         } else { a = "НЕТ ВРЕМЕНИ"; b = g_rtcOk ? "RTC OK" : "ЖДЁМ СИНХРОН"; }
         break;
       }
       case 1:
-        if (g_net == NET_STA_ON) {
+        if (g_net == NET_ETH_ON) {
+          a = "ETH:" + ETH.localIP().toString();
+          b = "КАБЕЛЬ: LINK OK";
+        } else if (g_net == NET_STA_ON) {
           a = "IP:" + WiFi.localIP().toString();
           b = "NET:" + (g_ssid.length() ? g_ssid.substring(0, 12) : String("?"));
         } else if (g_net == NET_AP) {
           a = "ТОЧКА:" + String(AP_SSID).substring(0, 10);
-          b = "IP:192.168.4.1";
-        } else { a = "ПОДКЛЮЧЕНИЕ"; b = "К WI-FI..."; }
+          b = "ПАРОЛЬ:" + g_apPass.substring(0, 9);   // пароль точки виден на экране
+        } else { a = "ПОДКЛЮЧЕНИЕ"; b = (g_net == NET_ETH_TRY) ? "К ETHERNET..." : "К WI-FI..."; }
         break;
       case 2: {
         int p = g_now ? periodOf(g_now) : -1;
@@ -508,7 +573,39 @@ void lcdTick() {
   lcdDraw();
 }
 
-// ========================= WI-FI ==============================
+// ==================== СЕТЬ: ETHERNET W5500 ===================
+/* W5500 висит на HSPI (SPI2_HOST) с собственными пинами —
+ * шина RC522 (VSPI, 18/19/23) не затрагивается. RST/INT модуля
+ * не используются (-1): сброс делает бортовая RC-цепь модуля. */
+void initEthernet() {
+  if (g_ethStarted) return;                // драйвер поднимается ОДИН раз за загрузку
+  if (g_ethStatic) {
+    IPAddress ip, gw, sn;
+    if (ip.fromString(g_eIp) && gw.fromString(g_eGw) && sn.fromString(g_eSn)) {
+      ETH.config(ip, gw, sn);              // статика; иначе остаётся DHCP
+    }
+  }
+  g_ethStarted = ETH.begin(ETH_PHY_W5500, 1, PIN_ETH_CS, -1, -1,
+                           SPI2_HOST, PIN_ETH_SCK, PIN_ETH_MISO, PIN_ETH_MOSI);
+}
+/* Диагностика канала: драйвер W5500 восстанавливает линк сам,
+ * здесь лишь подтверждаем, что канал жив (линк + IP).          */
+bool checkEthernet() {
+  if (!g_ethStarted) return false;
+  return ETH.connected();
+}
+/* Единый «адрес терминала» для LCD, панели и отчётов.          */
+IPAddress getLocalIP() {
+  if (g_net == NET_ETH_ON) return ETH.localIP();
+  if (g_net == NET_STA_ON) return WiFi.localIP();
+  if (g_net == NET_AP)     return WiFi.softAPIP();
+  return IPAddress(0, 0, 0, 0);
+}
+bool netOnline() {
+  return (g_net == NET_ETH_ON) || (g_net == NET_STA_ON);
+}
+
+// ==================== СЕТЬ: WI-FI / AP =======================
 void startSTA() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -518,24 +615,68 @@ void startSTA() {
 }
 void startAP() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, "");
+  String p = g_apPass;
+  if (p.length() < 8 || p.length() > 63) p = DEFAULT_AP_PASS; // WPA2: 8..63 символа
+  WiFi.softAP(AP_SSID, p.c_str());
   dns.start(53, "*", WiFi.softAPIP());
   g_net = NET_AP;
   g_netNext = millis() + g_apBackoff;
-  g_apBackoff = min(g_apBackoff * 2, 300000UL);   // экспоненциальный повтор, до 5 мин
-  lcdShow("НЕТ WI-FI: ТОЧКА", String(AP_SSID).substring(0, 16), 6000);
+  // экспоненциальный повтор до 5 мин — БЕЗ макроса min()
+  if (g_apBackoff < 150000UL) g_apBackoff = g_apBackoff * 2;
+  else g_apBackoff = 300000UL;
+  lcdShow("НЕТ СЕТИ: ТОЧКА", String(AP_SSID).substring(0, 16), 6000);
 }
-void wifiTick() {
+/* Выбор стартового канала по сохранённому в NVS режиму:
+ * 0 = Авто (Ethernet -> Wi-Fi -> точка), 1 = Wi-Fi, 2 = Ethernet
+ * (при ошибке Ethernet всё равно фолбэк на Wi-Fi/точку).       */
+void startNet() {
+  g_netRestartAt = 0;
+  g_ethLostT0 = 0;
+  if (g_netPref == 2 || (g_netPref == 0 && g_ethStarted)) {
+    g_net = NET_ETH_TRY;
+    g_ethT0 = millis();
+  } else if (g_ssid.length()) {
+    startSTA();
+  } else {
+    startAP();
+  }
+}
+void netTick() {
   static uint32_t last = 0;
   if ((uint32_t)(millis() - last) < 400) return;
   last = millis();
 
   if (g_netRestartAt && (int32_t)(millis() - g_netRestartAt) >= 0) {
-    g_netRestartAt = 0;
-    startSTA();
+    startNet();                            // смена сети/режима из админ-панели
     return;
   }
   switch (g_net) {
+    case NET_ETH_TRY:
+      if (checkEthernet()) {
+        g_net = NET_ETH_ON;
+        g_sntpOk = false;
+        g_apBackoff = 15000;               // успех — сброс экспоненты
+        configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+        lcdShow("ETHERNET: ОК", ETH.localIP().toString(), 5000);
+        logEvent("SYS_ETH_OK", "", 0, ETH.localIP().toString(), -1);
+      } else if ((uint32_t)(millis() - g_ethT0) > (ETH.linkUp() ? 15000UL : 5000UL)) {
+        // нет кабеля (5 с) или DHCP не ответил (15 с) — фолбэк на Wi-Fi
+        logEvent("SYS_ETH_FALLBACK", "", 0, "no link/dhcp", -1);
+        if (g_ssid.length()) startSTA(); else startAP();
+      }
+      break;
+    case NET_ETH_ON:
+      if (!checkEthernet()) {
+        if (!g_ethLostT0) g_ethLostT0 = millis();
+        else if ((uint32_t)(millis() - g_ethLostT0) > 8000UL) {
+          g_ethLostT0 = 0;                 // линк не вернулся за 8 с — фолбэк
+          logEvent("SYS_ETH_FALLBACK", "", 0, "link lost", -1);
+          if (g_ssid.length()) startSTA(); else startAP();
+        }
+      } else {
+        g_ethLostT0 = 0;
+      }
+      break;
     case NET_STA_TRY:
       if (WiFi.status() == WL_CONNECTED) {
         g_net = NET_STA_ON;
@@ -549,6 +690,15 @@ void wifiTick() {
       }
       break;
     case NET_STA_ON:
+      // в режиме «Авто» кабель приоритетнее: если W5500 ожил — переключаемся
+      if (g_netPref == 0 && g_ethStarted && checkEthernet()) {
+        g_net = NET_ETH_ON;
+        WiFi.disconnect();               // освобождаем маршрут по умолчанию для Ethernet;
+                                         // при потере линка фолбэк поднимет STA заново
+        lcdShow("ETHERNET: ОК", ETH.localIP().toString(), 5000);
+        logEvent("SYS_ETH_OK", "", 0, "auto", -1);
+        break;
+      }
       if (WiFi.status() != WL_CONNECTED) startSTA();   // автопереподключение
       break;
     case NET_AP:
@@ -562,7 +712,7 @@ void wifiTick() {
   if (g_net == NET_AP) dns.processNextRequest();
 }
 void sntpTick() {
-  if (g_net != NET_STA_ON || g_sntpOk) {
+  if (!netOnline() || g_sntpOk) {
     // периодическая сверка RTC с интернетом (раз в 6 часов)
     if (g_sntpOk && g_rtcOk && (uint32_t)(millis() - g_lastRtcSync) > 6UL*3600UL*1000UL)
       syncRtcFromNet(true);
@@ -743,7 +893,7 @@ void buttonTick() {
 
 // ===================== TELEGRAM-БОТ ==========================
 bool tgRequest(const String& url, const String& body, String& resp, const String& ctype) {
-  if (g_net != NET_STA_ON || !g_tgToken.length()) return false;
+  if (!netOnline() || !g_tgToken.length()) return false;
   WiFiClientSecure cli;
   cli.setInsecure();
   if (!cli.connect("api.telegram.org", 443)) return false;
@@ -802,9 +952,13 @@ void tgHandleCommand(const String& text) {
            "\nКоманды:\n/status - состояние\n/today - итоги дня"
            "\n/report [ГГГГ-ММ-ДД [ГГГГ-ММ-ДД]] - CSV-отчёт");
   } else if (cmd == "/status") {
+    String netInfo;
+    if (g_net == NET_ETH_ON)      netInfo = "Ethernet " + ETH.localIP().toString();
+    else if (g_net == NET_STA_ON) netInfo = "Wi-Fi " + WiFi.localIP().toString();
+    else                          netInfo = "резервная точка доступа";
     String s = String(DEVICE_NAME) + " · " + PLACE_NAMES[g_terminal ? 1 : 0] +
                "\nВремя: " + (g_now ? dateStrOf(g_now) + " " + timeStrOf(g_now) : String("нет")) +
-               "\nWi-Fi: " + (g_net == NET_STA_ON ? ("STA " + WiFi.localIP().toString()) : String("AP-режим")) +
+               "\nСеть: " + netInfo +
                "\nЛазер: " + laserName() +
                "\nСегодня: посещений " + String(g_tVisits) + ", гостей " + String(g_todayIds.size()) +
                ", отказов " + String(g_tDenied) + ", нарушений " + String(g_tBreach);
@@ -831,7 +985,7 @@ void tgTick() {
   static uint32_t last = 0;
   if ((uint32_t)(millis() - last) < 5000) return;   // реже опрос — меньше пауз в loop()
   last = millis();
-  if (g_net != NET_STA_ON || !g_tgToken.length()) return;
+  if (!netOnline() || !g_tgToken.length()) return;
   String resp;
   if (!tgRequest("/bot" + g_tgToken + "/getUpdates?offset=" + String(g_tgOffset + 1) +
                  "&timeout=0&limit=10", "", resp, "")) return;
@@ -852,7 +1006,7 @@ void tgTick() {
 
 // ======================= E-MAIL ==============================
 bool mailSend(const String& subject, const String& html, const String& text) {
-  if (g_net != NET_STA_ON || !g_smtpKey.length() || !g_emailTo.length()) return false;
+  if (!netOnline() || !g_smtpKey.length() || !g_emailTo.length()) return false;
   JsonDocument doc;
   doc["api_key"] = g_smtpKey;
   doc["to"].add(g_emailTo);
@@ -1133,7 +1287,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
   <b>ТАЛОН-32</b><span class="v">v1.7</span>
   <span class="chip" id="hPlace">—</span>
   <span class="chip on" id="hTime">--:--:--</span>
-  <span class="chip" id="hWifi">Wi-Fi</span>
+  <span class="chip" id="hWifi">Сеть</span>
   <span class="chip" id="hLaser">Лазер</span>
   <span class="sp"></span>
   <button class="btn blue" style="margin:0;padding:6px 12px" id="lout">Выход</button>
@@ -1156,8 +1310,9 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><div class="k">Гостей сегодня</div><div class="vv g" id="dGuests">0</div></div>
    <div><div class="k">Отказов</div><div class="vv r" id="dDenied">0</div></div>
    <div><div class="k">Нарушений луча</div><div class="vv a" id="dBreach">0</div></div>
-   <div><div class="k">Аптайм</div><div class="vv" id="dUp">—</div></div>
+   <div><div class="k">Канал связи</div><div class="vv c" id="dNet">—</div></div>
    <div><div class="k">IP-адрес</div><div class="vv c" id="dIp">—</div></div>
+   <div><div class="k">Аптайм</div><div class="vv" id="dUp">—</div></div>
    <div><div class="k">Свободно ОЗУ</div><div class="vv" id="dHeap">—</div></div>
   </div>
   <p class="mut" id="dPeer" style="margin:12px 0 0"></p>
@@ -1185,8 +1340,8 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
   <p class="mut">Поднесите новую карту к считывателю терминала — номер будет выдан автоматически
   (СТОЛОВАЯ = чётные, РЕСТОРАН = нечётные).</p>
   <div class="row" style="margin-top:8px">
-   <div><label>UID вручную (HEX, например 04A1B2C3)</label><input id="cUid"></div>
-   <div><label>Имя гостя</label><input id="cName"></div>
+   <div><label>UID вручную (HEX, например 04A1B2C3)</label><input id="cUid" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>Имя гостя</label><input id="cName" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
   </div>
   <button class="btn" id="cAdd">Добавить карту</button>
   <div style="overflow-x:auto;margin-top:12px"><table id="cTab">
@@ -1206,12 +1361,32 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
 
  <div class="card hide" id="t-net">
   <div class="row">
-   <div><label>Имя сети Wi-Fi (SSID)</label><input id="wSsid"></div>
-   <div><label>Пароль Wi-Fi</label><input id="wPass" type="password"></div>
+   <div><label>Основной канал связи</label><select id="nMode">
+    <option value="0">Авто: Ethernet → Wi-Fi → точка доступа</option>
+    <option value="1">Только Wi-Fi</option>
+    <option value="2">Только Ethernet (фолбэк на Wi-Fi при ошибке)</option>
+   </select></div>
+   <div><label>Пароль точки доступа Talon32-Setup (8–63 символа)</label>
+    <input id="aPass" type="password" placeholder="talon3232" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
   </div>
-  <button class="btn" id="wSave">Сохранить и переподключиться</button>
+  <div class="row">
+   <div><label>Имя сети Wi-Fi (SSID)</label><input id="wSsid" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>Пароль Wi-Fi (пусто = не менять)</label><input id="wPass" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+  </div>
+  <button class="btn" id="wSave">Сохранить Wi-Fi и переподключиться</button>
   <div class="row" style="margin-top:10px">
-   <div><label>IP второго терминала (сверка «одно место за период»)</label><input id="nPeer" placeholder="192.168.1.78"></div>
+   <div><label>Ethernet W5500: адрес</label><select id="eStatic">
+    <option value="0">DHCP (автоматически)</option>
+    <option value="1">Статический IP</option>
+   </select></div>
+   <div><label>Ethernet IP</label><input id="eIp" placeholder="192.168.1.77" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+  </div>
+  <div class="row">
+   <div><label>Шлюз</label><input id="eGw" placeholder="192.168.1.1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>Маска подсети</label><input id="eSn" placeholder="255.255.255.0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+  </div>
+  <div class="row" style="margin-top:10px">
+   <div><label>IP второго терминала (сверка «одно место за период»)</label><input id="nPeer" placeholder="192.168.1.78" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
    <div><label>Часовой пояс, минут от UTC (МСК = 180)</label><input id="nTz" type="number"></div>
   </div>
   <div class="row">
@@ -1219,22 +1394,24 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><label>Лазерный приёмник</label><select id="nLaser"><option value="0">Обычный (луч прерван = HIGH)</option><option value="1">Инверсный (луч прерван = LOW)</option></select></div>
   </div>
   <button class="btn" id="nSave">Сохранить параметры</button>
+  <p class="mut">Смена канала связи и настроек Ethernet применяется перезагрузкой — терминал выполнит её
+  сам сразу после сохранения. При ошибке Ethernet автоматически включается Wi-Fi, затем точка доступа.</p>
  </div>
 
  <div class="card hide" id="t-notify">
   <div class="row">
-   <div><label>Токен Telegram-бота (@BotFather)</label><input id="gTok" placeholder="123456:ABC-..."></div>
-   <div><label>Chat ID администратора</label><input id="gChat" placeholder="123456789"></div>
+   <div><label>Токен Telegram-бота (@BotFather)</label><input id="gTok" placeholder="123456:ABC-..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>Chat ID администратора</label><input id="gChat" placeholder="123456789" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
   </div>
   <button class="btn" id="gSave">Сохранить Telegram</button>
   <button class="btn blue" id="gTest">Тестовое сообщение</button>
   <p class="mut">В конце каждого периода бот шлёт одну строку с итогом; в 21:00 — CSV-файл за день.</p>
   <div class="row" style="margin-top:10px">
-   <div><label>SMTP2GO API-ключ</label><input id="mKey"></div>
-   <div><label>E-mail администратора (получатель)</label><input id="mTo" type="email"></div>
+   <div><label>SMTP2GO API-ключ</label><input id="mKey" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>E-mail администратора (получатель)</label><input id="mTo" type="email" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
   </div>
   <div class="row">
-   <div><label>Адрес отправителя</label><input id="mFrom" placeholder="talon32@ваш-домен.ru"></div>
+   <div><label>Адрес отправителя</label><input id="mFrom" placeholder="talon32@ваш-домен.ru" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
    <div></div>
   </div>
   <button class="btn" id="mSave">Сохранить почту</button>
@@ -1248,6 +1425,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
   <button class="btn" id="pSave">Сменить пароль</button>
   <p class="mut" id="pMsg"></p>
   <button class="btn red" id="reboot">Перезагрузить терминал</button>
+  <p class="mut" id="sysInfo" style="margin-top:10px"></p>
  </div>
 </div>
 </div>
@@ -1268,37 +1446,61 @@ function showLogin(){ document.getElementById('app').className='hide';
 function showApp(){ document.getElementById('login').className='hide';
   document.getElementById('app').className=''; }
 
-function refresh(){
+/* Фикс «стираются буквы» в полях ввода: значение записывается в поле
+   только если оно НЕ в фокусе — автообновление статуса не затирает то,
+   что администратор печатает прямо сейчас. */
+function setVal(id, v){
+  var el = document.getElementById(id);
+  if (el && document.activeElement !== el) el.value = v;
+}
+
+function refresh(full){
   api('/api/status').then(function(j){
     S = j;
     document.getElementById('hPlace').textContent = j.place;
     document.getElementById('hTime').textContent = j.time || '--:--:--';
-    document.getElementById('hWifi').textContent = j.wifiMode === 'STA' ? ('Wi-Fi: ' + j.ip) : 'Wi-Fi: точка доступа';
+    document.getElementById('hWifi').textContent =
+      j.wifiMode === 'ETH' ? ('Ethernet: ' + j.ip) :
+      j.wifiMode === 'STA' ? ('Wi-Fi: ' + j.ip) : 'Точка доступа';
     document.getElementById('hLaser').textContent = 'Лазер: ' + j.laser;
     document.getElementById('dPeriod').textContent = j.periodName || 'вне периода';
     document.getElementById('dVisits').textContent = j.today.visits;
     document.getElementById('dGuests').textContent = j.today.guests;
     document.getElementById('dDenied').textContent = j.today.denied;
     document.getElementById('dBreach').textContent = j.today.breach;
+    document.getElementById('dNet').textContent =
+      j.wifiMode === 'ETH' ? 'Ethernet' : j.wifiMode === 'STA' ? 'Wi-Fi' : 'Точка доступа';
     document.getElementById('dUp').textContent = j.uptime;
     document.getElementById('dIp').textContent = j.ip;
     document.getElementById('dHeap').textContent = j.heap;
     document.getElementById('dPeer').textContent = j.peerIp
       ? ('Второй терминал: ' + j.peerIp + ' — ' + (j.peerSeen ? 'НА СВЯЗИ' : 'НЕТ ОТВЕТА (решения по локальной базе)'))
       : 'Второй терминал не настроен (поле «IP второго терминала» во вкладке «Сеть»).';
+    document.getElementById('sysInfo').textContent =
+      'LCD: ' + (j.lcdOk ? 'исправен' : 'НЕ НАЙДЕН (проверьте I2C)') +
+      ' · Ethernet-линк: ' + (j.ethLink ? 'есть' : 'нет') +
+      ' · Точка доступа: ' + j.apSsid + (j.apPassSet ? ' (WPA2)' : '');
     if (j.regLeft > 0) document.getElementById('regInfo').textContent = 'идёт регистрация: ' + j.regLeft + ' c';
     else document.getElementById('regInfo').textContent = '';
-    var sc = j.sched;
-    for (var p = 0; p < 3; p++) {
-      document.getElementById('s' + p + 'a').value = m2t(sc[p][0]);
-      document.getElementById('s' + p + 'b').value = m2t(sc[p][1]);
+    if (full) {
+      /* заполнение полей — только при входе в панель и только вне фокуса */
+      var sc = j.sched;
+      for (var p = 0; p < 3; p++) {
+        setVal('s' + p + 'a', m2t(sc[p][0]));
+        setVal('s' + p + 'b', m2t(sc[p][1]));
+      }
+      setVal('sDay', m2t(j.dayReport));
+      setVal('nTerm', String(j.terminal));
+      setVal('nLaser', j.laserInvert ? '1' : '0');
+      setVal('nTz', String(j.tz));
+      setVal('nPeer', j.peerIp);
+      setVal('nMode', String(j.netMode));
+      setVal('eStatic', j.ethStatic ? '1' : '0');
+      setVal('eIp', j.eIp);
+      setVal('eGw', j.eGw);
+      setVal('eSn', j.eSn);
+      setVal('wSsid', j.ssid);
     }
-    document.getElementById('sDay').value = m2t(j.dayReport);
-    document.getElementById('nTerm').value = String(j.terminal);
-    document.getElementById('nLaser').value = j.laserInvert ? '1' : '0';
-    document.getElementById('nTz').value = String(j.tz);
-    document.getElementById('nPeer').value = j.peerIp;
-    document.getElementById('wSsid').value = j.ssid;
   }).catch(function(){});
 }
 function m2t(m){ var h = Math.floor(m/60), mm = m%60;
@@ -1310,7 +1512,7 @@ document.getElementById('lbtn').onclick = function(){
   var p = document.getElementById('lpass').value;
   fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({pass:p})}).then(function(r){ return r.json(); }).then(function(j){
-    if (j.ok) { showApp(); refresh(); setInterval(refresh, 3000); loadCards(); }
+    if (j.ok) { showApp(); refresh(true); setInterval(function(){ refresh(false); }, 3000); loadCards(); }
     else document.getElementById('lerr').textContent = 'Неверный пароль';
   });
 };
@@ -1368,7 +1570,7 @@ function loadCards(){
   });
 }
 document.getElementById('regBtn').onclick = function(){
-  api('/api/cards/reg', 'POST', {}).then(function(){ refresh(); });
+  api('/api/cards/reg', 'POST', {}).then(function(){ refresh(false); });
 };
 document.getElementById('cAdd').onclick = function(){
   api('/api/cards', 'POST', {uid: document.getElementById('cUid').value.trim().toUpperCase(),
@@ -1382,7 +1584,7 @@ document.getElementById('sSave').onclick = function(){
   for (var p = 0; p < 3; p++) s.push([t2m(document.getElementById('s'+p+'a').value),
                                       t2m(document.getElementById('s'+p+'b').value)]);
   api('/api/schedule', 'POST', {s: s, day: t2m(document.getElementById('sDay').value)})
-    .then(function(j){ alert(j.ok ? 'Расписание сохранено' : (j.error || 'Ошибка')); refresh(); });
+    .then(function(j){ alert(j.ok ? 'Расписание сохранено' : (j.error || 'Ошибка')); refresh(false); });
 };
 document.getElementById('wSave').onclick = function(){
   api('/api/wifi', 'POST', {ssid: document.getElementById('wSsid').value.trim(),
@@ -1393,8 +1595,18 @@ document.getElementById('nSave').onclick = function(){
   api('/api/net', 'POST', {peer: document.getElementById('nPeer').value.trim(),
     tz: parseInt(document.getElementById('nTz').value, 10),
     terminal: parseInt(document.getElementById('nTerm').value, 10),
-    invert: parseInt(document.getElementById('nLaser').value, 10)}).then(function(j){
-    alert(j.ok ? 'Параметры сохранены' : 'Ошибка'); refresh(); });
+    invert: parseInt(document.getElementById('nLaser').value, 10),
+    apPass: document.getElementById('aPass').value,
+    mode: parseInt(document.getElementById('nMode').value, 10),
+    'static': parseInt(document.getElementById('eStatic').value, 10),
+    eip: document.getElementById('eIp').value.trim(),
+    egw: document.getElementById('eGw').value.trim(),
+    esn: document.getElementById('eSn').value.trim()}).then(function(j){
+    if (!j.ok) { alert('Ошибка: ' + (j.error || 'проверьте поля')); return; }
+    alert(j.reboot ? 'Сохранено. Терминал перезагружается для применения настроек Ethernet — обновите страницу через 10–15 секунд.'
+                   : 'Параметры сохранены');
+    refresh(false);
+  });
 };
 document.getElementById('gSave').onclick = function(){
   api('/api/tg', 'POST', {token: document.getElementById('gTok').value.trim(),
@@ -1420,7 +1632,7 @@ document.getElementById('pSave').onclick = function(){
 document.getElementById('reboot').onclick = function(){
   if (confirm('Перезагрузить терминал?')) api('/api/reboot', 'POST', {});
 };
-refresh();
+refresh(true);
 </script></body></html>
 )talonwebui";
 
@@ -1482,12 +1694,30 @@ void setupWeb() {
     j["place"] = PLACE_NAMES[g_terminal ? 1 : 0];
     j["terminal"] = g_terminal;
     j["time"] = g_now ? (dateStrOf(g_now) + " " + timeStrOf(g_now)) : "";
-    j["wifiMode"] = g_net == NET_STA_ON ? "STA" : (g_net == NET_AP ? "AP" : "CONNECTING");
+    j["wifiMode"] = g_net == NET_STA_ON ? "STA" :
+                    g_net == NET_ETH_ON ? "ETH" :
+                    g_net == NET_AP ? "AP" : "CONNECTING";
     j["ssid"] = g_ssid;
-    j["ip"] = (g_net == NET_STA_ON) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-    j["rssi"] = (int32_t)WiFi.RSSI();
+    j["ip"] = getLocalIP().toString();
+    j["rssi"] = (g_net == NET_STA_ON) ? (int32_t)WiFi.RSSI() : 0;
+    j["netMode"] = g_netPref;
+    j["ethLink"] = (g_ethStarted && ETH.linkUp()) ? 1 : 0;
+    j["ethStatic"] = g_ethStatic ? 1 : 0;
+    j["eIp"] = g_eIp;
+    j["eGw"] = g_eGw;
+    j["eSn"] = g_eSn;
+    j["apSsid"] = String(AP_SSID);
+    j["apPassSet"] = (g_apPass.length() >= 8 && g_apPass.length() <= 63) ? 1 : 0;
+    j["lcdOk"] = g_lcdOk ? 1 : 0;
     j["laser"] = laserName();
-    j["regLeft"] = g_regUntil ? max(0, (int32_t)(g_regUntil - millis()) / 1000) : 0;
+    /* regLeft — фикс rev W5500: БЕЗ max(), сравнение ДО вычитания.
+     * Когда таймер истёк, g_regUntil - millis() больше не «заворачивается»
+     * в огромное число, потому что сравнение выполняется первым.       */
+    int32_t regLeft = 0;
+    if (g_regUntil > millis()) {
+      regLeft = (int32_t)((g_regUntil - millis()) / 1000);
+    }
+    j["regLeft"] = regLeft;
     int p = g_now ? periodOf(g_now) : -1;
     j["periodName"] = (p >= 0) ? String(PERIOD_NAMES[p]) + " " + minToStr(g_sched[p][0]) +
                                    "-" + minToStr(g_sched[p][1]) : "";
@@ -1599,6 +1829,7 @@ void setupWeb() {
     if (needAuth()) return;
     JsonDocument in; deserializeJson(in, server.arg("plain"));
     JsonDocument out;
+    bool ethChanged = false;
     if (!in["peer"].isNull()) { g_peerIp = String(in["peer"] | ""); prefs.putString("peerip", g_peerIp); }
     if (!in["tz"].isNull()) { g_tzMin = in["tz"] | 180; prefs.putInt("tz", g_tzMin); }
     if (!in["terminal"].isNull()) {
@@ -1609,7 +1840,50 @@ void setupWeb() {
       g_laserInvert = (in["invert"] | 0) != 0;
       prefs.putUChar("laserinv", g_laserInvert ? 1 : 0);
     }
+    /* --- пароль резервной точки доступа (WPA2: 8..63 символа) --- */
+    if (!in["apPass"].isNull()) {
+      String ap = String(in["apPass"] | "");
+      if (ap.length()) {
+        if (ap.length() < 8 || ap.length() > 63) {
+          out["ok"] = false; out["error"] = "пароль точки: от 8 до 63 символов";
+          sendJ(out); return;
+        }
+        g_apPass = ap;
+        prefs.putString("appass", g_apPass);
+        if (g_net == NET_AP) startAP();       // сейчас в точке — применить сразу
+      }
+    }
+    /* --- режим сети и Ethernet (применяются перезагрузкой) --- */
+    if (!in["mode"].isNull()) {
+      long m = in["mode"] | -1;
+      if (m < 0 || m > 2) { out["ok"] = false; out["error"] = "режим: 0/1/2"; sendJ(out); return; }
+      if ((uint8_t)m != g_netPref) { g_netPref = (uint8_t)m; prefs.putUChar("netpref", g_netPref); ethChanged = true; }
+    }
+    if (!in["static"].isNull()) {
+      bool st = (in["static"] | 0) != 0;
+      if (st != g_ethStatic) { g_ethStatic = st; prefs.putUChar("estatic", g_ethStatic ? 1 : 0); ethChanged = true; }
+    }
+    const char* ipKeys[3]  = { "eip", "egw", "esn" };
+    String*     ipVars[3]  = { &g_eIp, &g_eGw, &g_eSn };
+    const char* nvKeys[3]  = { "eip", "egw", "esn" };
+    for (int k = 0; k < 3; k++) {
+      if (in[ipKeys[k]].isNull()) continue;
+      String v = String(in[ipKeys[k]] | "");
+      if (v.length()) {
+        IPAddress t;
+        if (!t.fromString(v)) {
+          out["ok"] = false;
+          out["error"] = String(ipKeys[k]) + ": неверный IP-адрес";
+          sendJ(out); return;
+        }
+      }
+      if (v != *ipVars[k]) { *ipVars[k] = v; prefs.putString(nvKeys[k], v); ethChanged = true; }
+    }
     out["ok"] = true;
+    if (ethChanged) {
+      out["reboot"] = 1;
+      g_rebootAt = millis() + 900;            // Ethernet-настройки применяются при старте
+    }
     sendJ(out);
   });
 
@@ -1768,17 +2042,24 @@ void setup() {
   LittleFS.begin(true);
   LittleFS.mkdir("/log");
 
+  // Ethernet W5500 поднимается сразу, если режим не «Только Wi-Fi»
+  if (g_netPref != 1) initEthernet();
+
   // калибровка лазерного рубежа ПОСЛЕ загрузки настроек (учитывает инверсию)
   g_beamRawPrev = beamBlocked();
   g_beamStable = g_beamRawPrev;
   g_beamChg = millis();
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("ТАЛОН-32 v"); lcd.print(FW_VERSION);
-  lcd.setCursor(0, 1); lcd.print("ЗАПУСК...");
+  // hd44780: lcd.init() НЕ существует — корректный запуск lcd.begin(cols, rows),
+  // адрес и тип I2C-переходника библиотека определяет сама. Возврат != 0 = экрана нет.
+  g_lcdOk = (lcd.begin(16, 2) == 0);
+  if (g_lcdOk) {
+    lcd.backlight();
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("ТАЛОН-32 v"); lcd.print(FW_VERSION);
+    lcd.setCursor(0, 1); lcd.print("ЗАПУСК...");
+  }
 
   // Удержание кнопки при старте = смена зала (СТОЛОВАЯ <-> РЕСТОРАН)
   uint32_t bt0 = millis();
@@ -1790,9 +2071,11 @@ void setup() {
   if (held) {
     g_terminal = g_terminal ? 0 : 1;
     prefs.putUChar("terminal", g_terminal);
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("ЗАЛ ИЗМЕНЁН:");
-    lcd.setCursor(0, 1); lcd.print(PLACE_NAMES[g_terminal ? 1 : 0]);
+    if (g_lcdOk) {
+      lcd.clear();
+      lcd.setCursor(0, 0); lcd.print("ЗАЛ ИЗМЕНЁН:");
+      lcd.setCursor(0, 1); lcd.print(PLACE_NAMES[g_terminal ? 1 : 0]);
+    }
     delay(1800);
   }
 
@@ -1804,17 +2087,20 @@ void setup() {
     g_rtcOk = false;
   }
 
-  // RC522 — SPI ЯВНО на пинах 18/19/23 (требование Core 3.x)
+  // RC522 — VSPI ЯВНО на пинах 18/19/23 (требование Core 3.x)
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
   rfid.PCD_Init();
   byte ver = rfid.PCD_ReadRegister(rfid.VersionReg);
   bool rfidOk = (ver != 0x00 && ver != 0xFF);
 
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("САМОТЕСТ");
-  lcd.setCursor(0, 1);
-  lcd.print("RTC:"); lcd.print(g_rtcOk ? "OK" : "НЕТ");
-  lcd.print(" RFID:"); lcd.print(rfidOk ? "OK" : "НЕТ");
+  if (g_lcdOk) {
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("САМОТЕСТ");
+    lcd.setCursor(0, 1);
+    lcd.print("R:"); lcd.print(g_rtcOk ? "OK" : "--");
+    lcd.print(" F:"); lcd.print(rfidOk ? "OK" : "--");
+    lcd.print(" E:"); lcd.print(g_ethStarted ? (ETH.linkUp() ? "OK" : "..") : "off");
+  }
   delay(1500);
 
   loadCards();
@@ -1822,7 +2108,7 @@ void setup() {
   if (g_now) { g_dateStr = dateStrOf(g_now); g_minuteOfDay = -1; }
   rebuildTodayCache();
 
-  if (g_ssid.length()) startSTA(); else startAP();
+  startNet();                       // Ethernet -> Wi-Fi -> точка (по сохранённому режиму)
   setupWeb();
   beep(BEEP_BOOT, 5);
   lcdShow("ГОТОВ К РАБОТЕ", PLACE_NAMES[g_terminal ? 1 : 0], 3500);
@@ -1832,7 +2118,7 @@ void setup() {
 // ========================== LOOP =============================
 void loop() {
   server.handleClient();
-  wifiTick();
+  netTick();
   sntpTick();
   timeTick();
   lcdTick();

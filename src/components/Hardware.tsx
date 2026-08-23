@@ -42,6 +42,15 @@ const GROUPS: Record<string, { color: string; wires: Array<{ y: number; side: "l
     color: "#8fa5b8",
     wires: [{ y: 330, side: "l", bx: 260, by: 420, label: "GPIO33 · кнопка → GND" }],
   },
+  Ethernet: {
+    color: "#c792ea",
+    wires: [
+      { y: 480, side: "l", bx: 260, by: 492, label: "GPIO15 · CS" },
+      { y: 500, side: "l", bx: 260, by: 514, label: "GPIO17 · SCK" },
+      { y: 520, side: "l", bx: 260, by: 536, label: "GPIO16 · MOSI" },
+      { y: 540, side: "l", bx: 260, by: 558, label: "GPIO12 · MISO" },
+    ],
+  },
 };
 
 function Wire({ w, color, active, dim }: { w: { y: number; side: "l" | "r"; bx: number; by: number; label: string }; color: string; active: boolean; dim: boolean }) {
@@ -88,7 +97,7 @@ export default function Hardware() {
         kicker="Комплектующие"
         tone="ice"
         title={<>Всё железо — на одном столе</>}
-        lead="Одиннадцать позиций на оба терминала, всё есть в любом магазине Arduino-модулей. Ориентировочная стоимость комплекта — 1 900–2 600 ₽. Наведите курсор на строку таблицы — схема подсветит соответствующие провода."
+        lead="Тринадцать позиций на оба терминала, всё есть в любом магазине Arduino-модулей. Ориентировочная стоимость комплекта — 2 900–3 900 ₽. Наведите курсор на строку таблицы — схема подсветит соответствующие провода. Новое в rev W5500: модуль Ethernet на отдельной шине HSPI — существующая разводка не изменена ни на одном пине."
       />
 
       <div className="grid gap-10 lg:grid-cols-[1fr_1.15fr]">
@@ -116,7 +125,10 @@ export default function Hardware() {
               </div>
             ))}
           </div>
-          <p className="mt-3 font-mono text-[11px] text-fog/70">* RC522 питается строго от 3,3 В — подача 5 В выводит модуль из строя.</p>
+          <p className="mt-3 font-mono text-[11px] leading-relaxed text-fog/70">
+            * RC522 и W5500 питаются строго от 3,3 В — подача 5 В выводит модули из строя.<br />
+            ** W5500 в момент передачи потребляет до ~130 мА: блок питания 5 В берите с запасом (2–3 А).
+          </p>
         </Reveal>
 
         {/* схема */}
@@ -141,9 +153,9 @@ export default function Hardware() {
                 </div>
               </div>
 
-              <svg viewBox="0 0 960 560" className="w-full" role="img" aria-label="Схема подключения ESP32, RC522, LCD, DS3231, лазерного рубежа и индикации">
+              <svg viewBox="0 0 960 640" className="w-full" role="img" aria-label="Схема подключения ESP32, RC522, W5500, LCD, DS3231, лазерного рубежа и индикации">
                 {/* плата */}
-                <rect x="390" y="70" width="180" height="430" rx="8" fill="#121b24" stroke="#2a3d4e" strokeWidth="1.5" />
+                <rect x="390" y="70" width="180" height="500" rx="8" fill="#121b24" stroke="#2a3d4e" strokeWidth="1.5" />
                 <rect x="440" y="48" width="80" height="30" rx="3" fill="#0f171f" stroke="#2a3d4e" />
                 <text x="480" y="68" textAnchor="middle" fontSize="10" fill="#8fa5b8" fontFamily="JetBrains Mono, monospace">micro-USB 5V</text>
                 <text x="480" y="120" textAnchor="middle" fontSize="15" fontWeight="700" fill="#dfeaf3" fontFamily="Unbounded, sans-serif">ESP32</text>
@@ -152,7 +164,7 @@ export default function Hardware() {
                 <text x="480" y="195" textAnchor="middle" fontSize="10" fill="#4ce08f" fontFamily="JetBrains Mono, monospace">ТАЛОН-32</text>
                 <text x="480" y="250" textAnchor="middle" fontSize="10" fill="#8fa5b8" fontFamily="JetBrains Mono, monospace">3V3 · GND</text>
                 <text x="480" y="268" textAnchor="middle" fontSize="10" fill="#8fa5b8" fontFamily="JetBrains Mono, monospace">общие шины питания</text>
-                {[120, 150, 180, 210, 240, 300, 330, 360, 390, 420, 450].map((y) => (
+                {[120, 150, 180, 210, 240, 300, 330, 360, 390, 420, 450, 480, 500, 520, 540].map((y) => (
                   <g key={"p" + y}>
                     <rect x="384" y={y - 4} width="10" height="8" fill="#223140" />
                     <rect x="566" y={y - 4} width="10" height="8" fill="#223140" />
@@ -174,14 +186,19 @@ export default function Hardware() {
                 <Box x={700} y={392} w={230} h={112} title="Индикация + звук" color={GROUPS.Индикация.color} active={active === "Индикация"} onHover={(g) => setActive(g ?? null)}
                   lines={["LED зел → 26 · красн → 27", "LED оранж → 14 (через 220 Ом)", "Buzzer активный → GPIO13"]} />
                 <Box x={30} y={84} w={230} h={110} title="LCD 1602 (I2C)" color={GROUPS.I2C.color} active={active === "I2C"} onHover={(g) => setActive(g ?? null)}
-                  lines={["SDA → GPIO21 · SCL → GPIO22", "VCC → VIN · GND → GND", "адрес 0x27 (или 0x3F)"]} />
+                  lines={["SDA → GPIO21 · SCL → GPIO22", "VCC → VIN · GND → GND", "адрес определит hd44780 сама"]} />
                 <Box x={30} y={250} w={230} h={86} title="RTC DS3231" color={GROUPS.I2C.color} active={active === "I2C"} onHover={(g) => setActive(g ?? null)}
                   lines={["SDA/SCL — та же шина I2C", "VCC → 3V3 · GND + батарейка"]} />
                 <Box x={30} y={392} w={230} h={66} title="Кнопка регистрации" color={GROUPS.Управление.color} active={active === "Управление"} onHover={(g) => setActive(g ?? null)}
                   lines={["GPIO33 → кнопка → GND", "режим выдачи карт 30 с"]} />
+                <Box x={30} y={470} w={230} h={110} title="Ethernet W5500 (новое)" color={GROUPS.Ethernet.color} active={active === "Ethernet"} onHover={(g) => setActive(g ?? null)}
+                  lines={["SCK → GPIO17 · MOSI → GPIO16", "MISO → GPIO12 · CS → GPIO15", "3.3V + GND · RJ-45 → роутер", "RST/INT не нужны (бортовой сброс)"]} />
 
-                <text x="480" y="540" textAnchor="middle" fontSize="10.5" fill="#8fa5b8" fontFamily="JetBrains Mono, monospace">
-                  LCD и DS3231 висят на одной шине I2C (21/22) — адреса 0x27 и 0x68 не конфликтуют
+                <text x="480" y="606" textAnchor="middle" fontSize="10.5" fill="#8fa5b8" fontFamily="JetBrains Mono, monospace">
+                  LCD и DS3231 — одна шина I2C (21/22), адреса не конфликтуют
+                </text>
+                <text x="480" y="624" textAnchor="middle" fontSize="10.5" fill="#c792ea" fontFamily="JetBrains Mono, monospace">
+                  W5500 — отдельная шина HSPI (SPI2_HOST): с VSPI-шиной RC522 (18/19/23) не пересекается
                 </text>
               </svg>
             </div>
