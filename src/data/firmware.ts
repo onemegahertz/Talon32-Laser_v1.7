@@ -155,6 +155,9 @@ uint8_t  g_terminal = 0;                 // 0 = СТОЛОВАЯ, 1 = РЕСТО
 bool     g_laserInvert = false;          // true, если приёмник инверсный
 uint16_t g_sched[3][2] = { {510, 690}, {810, 930}, {1080, 1200} }; // ЗАВТРАК/ОБЕД/УЖИН
 uint16_t g_dayReportMin = 1260;          // суточный отчёт в 21:00
+uint16_t g_planGuests = 0;               // план гостей на сегодня (информационный), 0 = не задан
+String   g_operatorCode;                 // код доступа оператора (пусто = режим оператора выключен)
+bool     g_operatorMode = false;         // активен ли сейчас режим оператора (только чтение)
 
 static const char* PLACE_NAMES[2]  = { "СТОЛОВАЯ", "РЕСТОРАН" };
 static const char* PERIOD_NAMES[3] = { "ЗАВТРАК", "ОБЕД", "УЖИН" };
@@ -218,6 +221,7 @@ IPAddress getLocalIP();
 void initEthernet();
 bool checkEthernet();
 void startNet();
+bool peerTodayCount(String& place, uint16_t& visits, uint16_t& guests);
 
 // ================== НЕБЛОКИРУЮЩИЙ ЗВУК =======================
 /* Паттерны: пары (вкл, выкл) в мс. Явные паузы гарантируют,
@@ -418,6 +422,39 @@ bool peerVisited(const String& uid, int p, const String& dateStr) {
   return resp.indexOf("\"visited\":true") >= 0;
 }
 
+/* Запрос счётчиков «сегодня» у ВТОРОГО терминала — чтобы на дашборде
+ * видеть проходы сразу и в столовой, и в ресторане. Авторизация по
+ * межтерминальному ключу X-Peer-Key (как и сверка посещений).        */
+bool peerTodayCount(String& place, uint16_t& visits, uint16_t& guests) {
+  if (g_peerIp.length() < 7 || !netOnline()) return false;
+  WiFiClient c;
+  if (!c.connect(g_peerIp.c_str(), 80)) { g_peerSeen = false; return false; }
+  g_peerSeen = true;
+  String req = String("GET /api/todaycount HTTP/1.0\r\nHost: ") + g_peerIp +
+               "\r\nX-Peer-Key: " + g_peerKey + "\r\nConnection: close\r\n\r\n";
+  c.print(req);
+  String resp;
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < 900) {
+    while (c.available()) {
+      resp += (char)c.read();
+      if (resp.length() > 2000) break;
+    }
+    if (resp.length() > 2000) break;
+    if (!c.connected() && resp.length() > 0) break;
+    yield();
+  }
+  c.stop();
+  int b = resp.indexOf("\r\n\r\n");
+  if (b < 0) return false;
+  JsonDocument d;
+  if (deserializeJson(d, resp.substring(b + 4))) return false;
+  place  = String(d["place"] | "");
+  visits = d["visits"] | 0;
+  guests = d["guests"] | 0;
+  return true;
+}
+
 // ==================== РЕЕСТР КАРТ ============================
 bool loadCards() {
   g_cards.clear();
@@ -455,16 +492,18 @@ CardRec* findCard(const String& uid) {
   return nullptr;
 }
 
-/* ИДЕЯ НЕПЕРЕСЕКАЮЩИХСЯ ID (v1.7):
- * счётчики в каждом терминале НЕЗАВИСИМЫ и стартуют с 1,
- * но выдаваемый номер = счётчик*2 + чётность_терминала.
- * СТОЛОВАЯ  -> чётные:  2, 4, 6, 8 ...
- * РЕСТОРАН  -> нечётные: 3, 5, 7, 9 ...
- * Коллизия между залами невозможна математически.             */
+/* СКВОЗНАЯ НУМЕРАЦИЯ КАРТ (rev W5500 / пожелание заказчика):
+ * номер гостя — простое последовательное число 1, 2, 3, ...
+ * БЕЗ привязки к залу (раньше была чёт/нечёт по терминалу).
+ *
+ * ВАЖНО: защита «одно место за один период» строится НЕ на номере,
+ * а на ФИЗИЧЕСКОМ UID карты (уникален у каждой карты), поэтому
+ * сквозная нумерация никак не ослабляет контроль прохода:
+ * сверка localVisited/peerVisited идёт по uid, а не по id.      */
 uint32_t issueNextId() {
   uint32_t cnt = prefs.getUInt("idcnt", 0) + 1;
   prefs.putUInt("idcnt", cnt);
-  return cnt * 2 + (g_terminal == 0 ? 0 : 1);
+  return cnt;                              // сквозной номер: 1, 2, 3 ...
 }
 
 // ==================== НАСТРОЙКИ NVS ==========================
@@ -490,6 +529,8 @@ void loadSettings() {
   g_terminal    = prefs.getUChar("terminal", 0) ? 1 : 0;
   g_laserInvert = prefs.getUChar("laserinv", 0) != 0;
   g_dayReportMin= prefs.getUShort("dayrep", 1260);
+  g_planGuests  = prefs.getUShort("plan", 0);
+  g_operatorCode= prefs.getString("opcode", "");
   String sc     = prefs.getString("sched", "510,690,810,930,1080,1200");
   int v[6]; int n = sscanf(sc.c_str(), "%d,%d,%d,%d,%d,%d",
                            &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -856,7 +897,7 @@ void processReg(const String& uid) {
   saveCards();
   lampOn(0, 3000);
   beep(BEEP_REGOK, 3);               // два чётких гудка с паузой
-  lcdShow("КАРТА ЗАПИСАНА", "ID " + String(id) + (g_terminal ? " НЕЧЁТ" : " ЧЁТН"), 4000);
+  lcdShow("КАРТА ЗАПИСАНА", "ГОСТЬ ID " + String(id), 4000);
   logEvent("CARD_REG", uid, id, c.name, -1);
 }
 
@@ -1340,10 +1381,35 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
  <div class="card" id="t-dash">
   <div class="grid">
    <div><div class="k">Период сейчас</div><div class="vv c" id="dPeriod">—</div></div>
+   <div><div class="k">Зал этого терминала</div><div class="vv c" id="dPlace">—</div></div>
    <div><div class="k">Посещений сегодня</div><div class="vv g" id="dVisits">0</div></div>
    <div><div class="k">Гостей сегодня</div><div class="vv g" id="dGuests">0</div></div>
    <div><div class="k">Отказов</div><div class="vv r" id="dDenied">0</div></div>
    <div><div class="k">Нарушений луча</div><div class="vv a" id="dBreach">0</div></div>
+  </div>
+
+  <div style="margin-top:16px;border:1px solid var(--ln);border-radius:10px;padding:12px 14px;background:var(--p2)">
+   <div class="k" style="margin-bottom:8px">Прошло сегодня (онлайн)</div>
+   <div style="display:flex;flex-wrap:wrap;gap:22px;align-items:baseline">
+     <div><span style="font-size:26px;font-weight:800;font-family:Consolas,monospace" id="dHere">0</span>
+       <span class="mut" id="dHerePlace" style="margin-left:6px">—</span></div>
+     <div><span style="font-size:26px;font-weight:800;font-family:Consolas,monospace" id="dPeerVisits">—</span>
+       <span class="mut" id="dPeerPlace" style="margin-left:6px">второй зал</span></div>
+   </div>
+   <p class="mut" style="margin:8px 0 0">Счётчик второго зала берётся со второго терминала (нужен его IP во вкладке «Сеть»).</p>
+  </div>
+
+  <div style="margin-top:14px;border:1px solid var(--ln);border-radius:10px;padding:12px 14px;background:var(--p2)">
+   <div class="k" style="margin-bottom:8px">План гостей на сегодня (справочно)</div>
+   <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+     <input id="dPlan" type="number" min="0" style="max-width:120px" autocomplete="off">
+     <button class="btn" style="margin:0" id="dPlanSave">Сохранить план</button>
+     <span class="mut">Осталось по плану: <b id="dPlanLeft" style="color:var(--g);font-family:Consolas,monospace">—</b></span>
+   </div>
+   <p class="mut" style="margin:8px 0 0">Поле информационное: уменьшается по мере прохода гостей (план − уникальные гости). Использовать или нет — решает оператор.</p>
+  </div>
+
+  <div class="grid" style="margin-top:14px">
    <div><div class="k">Канал связи</div><div class="vv c" id="dNet">—</div></div>
    <div><div class="k">IP-адрес</div><div class="vv c" id="dIp">—</div></div>
    <div><div class="k">Аптайм</div><div class="vv" id="dUp">—</div></div>
@@ -1371,8 +1437,9 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
  <div class="card hide" id="t-cards">
   <button class="btn" id="regBtn">Режим регистрации карты (30 с)</button>
   <span class="mut" id="regInfo" style="margin-left:12px"></span>
-  <p class="mut">Поднесите новую карту к считывателю терминала — номер будет выдан автоматически
-  (СТОЛОВАЯ = чётные, РЕСТОРАН = нечётные).</p>
+  <p class="mut">Поднесите новую карту к считывателю терминала — номер будет выдан автоматически.
+  Нумерация сквозная (1, 2, 3…) и не зависит от зала. Контроль «одно место за период» идёт по
+  уникальному UID карты, а не по номеру, поэтому двойной проход невозможен.</p>
   <div class="row" style="margin-top:8px">
    <div><label>UID вручную (HEX, например 04A1B2C3)</label><input id="cUid" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
    <div><label>Имя гостя</label><input id="cName" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
@@ -1424,7 +1491,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><label>Часовой пояс, минут от UTC (МСК = 180)</label><input id="nTz" type="number"></div>
   </div>
   <div class="row">
-   <div><label>Терминал</label><select id="nTerm"><option value="0">СТОЛОВАЯ (чётные ID)</option><option value="1">РЕСТОРАН (нечётные ID)</option></select></div>
+   <div><label>Терминал</label><select id="nTerm"><option value="0">СТОЛОВАЯ</option><option value="1">РЕСТОРАН</option></select></div>
    <div><label>Лазерный приёмник</label><select id="nLaser"><option value="0">Обычный (луч прерван = HIGH)</option><option value="1">Инверсный (луч прерван = LOW)</option></select></div>
   </div>
   <button class="btn" id="nSave">Сохранить параметры</button>
@@ -1458,11 +1525,55 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
   </div>
   <button class="btn" id="pSave">Сменить пароль</button>
   <p class="mut" id="pMsg"></p>
-  <button class="btn red" id="reboot">Перезагрузить терминал</button>
+
+  <div style="margin-top:18px;border-top:1px solid var(--ln);padding-top:14px">
+   <div class="k" style="margin-bottom:8px">Режим оператора (столовая / ресторан)</div>
+   <p class="mut" style="margin:0 0 10px">Оператор видит экран «только чтение»: сколько гостей прошло, кто уже был
+   (номер карты / UID / имя), план и остаток. Выдавать карты и менять настройки оператор НЕ может.</p>
+   <div class="row">
+    <div><label>Код доступа оператора (задаёт администратор, пусто = режим выключен)</label>
+     <input id="opCodeSet" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="например 2468"></div>
+    <div><label>Вход в режим оператора</label>
+     <input id="opCodeEnter" type="password" autocomplete="off" placeholder="введите код"></div>
+   </div>
+   <button class="btn" id="opCodeSave">Сохранить код оператора</button>
+   <button class="btn blue" id="opEnter">Открыть режим оператора</button>
+   <p class="mut" id="opMsg" style="margin-top:8px"></p>
+  </div>
+
+  <button class="btn red" id="reboot" style="margin-top:14px">Перезагрузить терминал</button>
   <p class="mut" id="sysInfo" style="margin-top:10px"></p>
  </div>
 </div>
 </div>
+
+<!-- ЭКРАН ОПЕРАТОРА (только чтение, поверх админки) -->
+<div id="opview" class="hide"><div class="wrap">
+ <div class="hd">
+  <b>ТАЛОН-32</b><span class="v">оператор</span>
+  <span class="chip on" id="opPlace">—</span>
+  <span class="chip on" id="opTime">--:--:--</span>
+  <span class="sp"></span>
+  <button class="btn red" style="margin:0;padding:6px 12px" id="opExit">Выйти из режима</button>
+ </div>
+ <div class="card">
+  <div class="grid">
+   <div><div class="k">Прошло (посещений)</div><div class="vv g" id="opVisits">0</div></div>
+   <div><div class="k">Гостей (уникальных)</div><div class="vv g" id="opGuests">0</div></div>
+   <div><div class="k">Отказов</div><div class="vv r" id="opDenied">0</div></div>
+   <div><div class="k">Нарушений луча</div><div class="vv a" id="opBreach">0</div></div>
+   <div><div class="k">План на сегодня</div><div class="vv c" id="opPlan">—</div></div>
+   <div><div class="k">Осталось по плану</div><div class="vv c" id="opLeft">—</div></div>
+  </div>
+ </div>
+ <div class="card">
+  <div class="k" style="margin-bottom:8px">Кто уже был сегодня</div>
+  <div style="overflow-x:auto"><table id="opTab">
+   <tr><th>Время</th><th>№ карты</th><th>UID</th><th>Гость</th><th>Период</th><th>Событие</th></tr>
+  </table></div>
+  <p class="mut" id="opEmpty" style="margin-top:8px"></p>
+ </div>
+</div></div>
 
 <script>
 var S = null;
@@ -1491,6 +1602,8 @@ function setVal(id, v){
 function refresh(full){
   api('/api/status').then(function(j){
     S = j;
+    /* режим оператора: сервер сообщает, что панель сейчас в режиме «только чтение» */
+    applyOpMode(j.opMode === 1);
     document.getElementById('hPlace').textContent = j.place;
     document.getElementById('hTime').textContent = j.time || '--:--:--';
     document.getElementById('hWifi').textContent =
@@ -1498,10 +1611,17 @@ function refresh(full){
       j.wifiMode === 'STA' ? ('Wi-Fi: ' + j.ip) : 'Точка доступа';
     document.getElementById('hLaser').textContent = 'Лазер: ' + j.laser;
     document.getElementById('dPeriod').textContent = j.periodName || 'вне периода';
+    document.getElementById('dPlace').textContent = j.place;
     document.getElementById('dVisits').textContent = j.today.visits;
     document.getElementById('dGuests').textContent = j.today.guests;
     document.getElementById('dDenied').textContent = j.today.denied;
     document.getElementById('dBreach').textContent = j.today.breach;
+    document.getElementById('dHere').textContent = j.today.visits;
+    document.getElementById('dHerePlace').textContent = j.place + ' (этот терминал)';
+    document.getElementById('dPlan').setAttribute('placeholder', '0 = не задан');
+    if (full) setVal('dPlan', String(j.plan || 0));
+    document.getElementById('dPlanLeft').textContent =
+      (j.plan > 0) ? Math.max(0, j.plan - j.today.guests) : '—';
     document.getElementById('dNet').textContent =
       j.wifiMode === 'ETH' ? 'Ethernet' : j.wifiMode === 'STA' ? 'Wi-Fi' : 'Точка доступа';
     document.getElementById('dUp').textContent = j.uptime;
@@ -1542,11 +1662,89 @@ function m2t(m){ var h = Math.floor(m/60), mm = m%60;
 function t2m(v){ if(!v) return -1; var a = v.split(':');
   return parseInt(a[0],10)*60 + parseInt(a[1],10); }
 
+/* ---------- РЕЖИМ ОПЕРАТОРА (только чтение) ---------- */
+function applyOpMode(on){
+  var app = document.getElementById('app'), op = document.getElementById('opview'),
+      lg = document.getElementById('login');
+  if (on) {
+    app.className = 'hide'; lg.className = 'hide'; op.className = '';
+    refreshOpView();
+  } else {
+    op.className = 'hide';
+    /* login/app остаются в своём текущем состоянии */
+  }
+}
+function refreshOpView(){
+  api('/api/today').then(function(j){
+    document.getElementById('opPlace').textContent = j.place;
+    document.getElementById('opTime').textContent = j.time || '--:--:--';
+    document.getElementById('opVisits').textContent = j.visits;
+    document.getElementById('opGuests').textContent = j.guests;
+    document.getElementById('opDenied').textContent = j.denied;
+    document.getElementById('opBreach').textContent = j.breach;
+    document.getElementById('opPlan').textContent = (j.plan > 0) ? j.plan : '—';
+    document.getElementById('opLeft').textContent = (j.plan > 0) ? Math.max(0, j.plan - j.guests) : '—';
+    var t = document.getElementById('opTab');
+    var h = '<tr><th>Время</th><th>№ карты</th><th>UID</th><th>Гость</th><th>Период</th><th>Событие</th></tr>';
+    for (var i = j.rows.length - 1; i >= 0; i--) { var r = j.rows[i];
+      h += '<tr><td>' + esc(r.tm) + '</td><td>' + esc(r.id) + '</td><td>' + esc(r.uid) +
+        '</td><td>' + esc(r.name) + '</td><td>' + esc(r.period) + '</td><td>' + badge(r.event) + '</td></tr>'; }
+    t.innerHTML = h;
+    document.getElementById('opEmpty').textContent = j.rows.length
+      ? '' : 'Сегодня проходов пока не было.';
+  }).catch(function(){});
+}
+/* ---------- счётчик ВТОРОГО зала (столовая/ресторант) ---------- */
+function refreshPeerToday(){
+  if (!S || !S.peerIp) return;
+  api('/api/peertoday').then(function(j){
+    if (j.ok) {
+      document.getElementById('dPeerVisits').textContent = j.visits;
+      document.getElementById('dPeerPlace').textContent = j.place + ' (второй зал)';
+    } else {
+      document.getElementById('dPeerVisits').textContent = '—';
+      document.getElementById('dPeerPlace').textContent = 'второй зал: нет ответа';
+    }
+  }).catch(function(){});
+}
+/* ---------- обработчики: план и оператор ---------- */
+document.getElementById('dPlanSave').onclick = function(){
+  var v = parseInt(document.getElementById('dPlan').value, 10);
+  if (isNaN(v) || v < 0) v = 0;
+  api('/api/plan', 'POST', {plan: v}).then(function(j){
+    if (j.ok) refresh(false);
+  });
+};
+document.getElementById('opCodeSave').onclick = function(){
+  var c = document.getElementById('opCodeSet').value.trim();
+  api('/api/operator/code', 'POST', {code: c}).then(function(j){
+    document.getElementById('opMsg').textContent = j.ok
+      ? (c ? 'Код оператора сохранён.' : 'Код очищен — режим оператора выключен.')
+      : ('Ошибка: ' + (j.error || ''));
+  });
+};
+document.getElementById('opEnter').onclick = function(){
+  var c = document.getElementById('opCodeEnter').value;
+  fetch('/api/operator/login', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({code: c})}).then(function(r){ return r.json(); }).then(function(j){
+    if (j.ok) { applyOpMode(true); }
+    else document.getElementById('opMsg').textContent = 'Неверный код оператора (или режим выключен).';
+  });
+};
+document.getElementById('opExit').onclick = function(){
+  fetch('/api/operator/logout', {method:'POST'}).then(function(){
+    applyOpMode(false); refresh(false);
+  });
+};
+
 document.getElementById('lbtn').onclick = function(){
   var p = document.getElementById('lpass').value;
   fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({pass:p})}).then(function(r){ return r.json(); }).then(function(j){
-    if (j.ok) { showApp(); refresh(true); setInterval(function(){ refresh(false); }, 3000); loadCards(); }
+    if (j.ok) { showApp(); refresh(true); refreshPeerToday();
+      setInterval(function(){ refresh(false); if (document.getElementById('opview').className === '') refreshOpView(); }, 3000);
+      setInterval(refreshPeerToday, 15000);
+      loadCards(); }
     else document.getElementById('lerr').textContent = 'Неверный пароль';
   });
 };
@@ -1744,6 +1942,8 @@ void setupWeb() {
     j["apPassSet"] = (g_apPass.length() >= 8 && g_apPass.length() <= 63) ? 1 : 0;
     j["lcdOk"] = g_lcdOk ? 1 : 0;
     j["laser"] = laserName();
+    j["plan"] = g_planGuests;                  // план гостей на сегодня
+    j["opMode"] = g_operatorMode ? 1 : 0;      // активен ли режим оператора
     /* regLeft — фикс rev W5500: БЕЗ max(), сравнение ДО вычитания.
      * Когда таймер истёк, g_regUntil - millis() больше не «заворачивается»
      * в огромное число, потому что сравнение выполняется первым.       */
@@ -2012,6 +2212,118 @@ void setupWeb() {
     if (needAuth()) return;
     JsonDocument out; out["ok"] = true; sendJ(out);
     g_rebootAt = millis() + 800;
+  });
+
+  // ---------- ПЛАН ГОСТЕЙ (информационный, сбрасывается сам к началу дня) ----------
+  server.on("/api/plan", HTTP_GET, []() {
+    if (needAuth()) return;
+    JsonDocument out; out["plan"] = g_planGuests; sendJ(out);
+  });
+  server.on("/api/plan", HTTP_POST, []() {
+    if (needAuth()) return;
+    JsonDocument in; deserializeJson(in, server.arg("plain"));
+    long v = in["plan"] | -1;
+    JsonDocument out;
+    if (v < 0 || v > 65535) { out["ok"] = false; out["error"] = "план: 0..65535"; sendJ(out); return; }
+    g_planGuests = (uint16_t)v;
+    prefs.putUShort("plan", g_planGuests);
+    out["ok"] = true; sendJ(out);
+  });
+
+  // ---------- РЕЖИМ ОПЕРАТОРА (только чтение) ----------
+  // Код задаёт администратор; пустой код = режим выключен.
+  server.on("/api/operator/code", HTTP_POST, []() {
+    if (needAuth()) return;
+    JsonDocument in; deserializeJson(in, server.arg("plain"));
+    String code = String(in["code"] | "");
+    JsonDocument out;
+    if (code.length() > 16) { out["ok"] = false; out["error"] = "код: до 16 символов"; sendJ(out); return; }
+    g_operatorCode = code;
+    prefs.putString("opcode", g_operatorCode);
+    out["ok"] = true; sendJ(out);
+  });
+  // Вход оператора: сессия админа НЕ требуется, только правильный код.
+  server.on("/api/operator/login", HTTP_POST, []() {
+    JsonDocument in; deserializeJson(in, server.arg("plain"));
+    String code = String(in["code"] | "");
+    JsonDocument out;
+    if (g_operatorCode.length() && code == g_operatorCode) {
+      g_operatorMode = true;
+      out["ok"] = true;
+      logEvent("SYS_OPERATOR_ON", "", 0, "", -1);
+    } else {
+      out["ok"] = false; out["error"] = "bad code";
+    }
+    sendJ(out);
+  });
+  server.on("/api/operator/logout", HTTP_POST, []() {
+    g_operatorMode = false;
+    JsonDocument out; out["ok"] = true; sendJ(out);
+  });
+
+  // Сводка «сегодня» для оператора И админа: счётчики + список гостей.
+  server.on("/api/today", HTTP_GET, []() {
+    if (!authed() && !g_operatorMode) {          // оператору сессия админа не нужна
+      JsonDocument d; d["error"] = "unauthorized"; sendJ(d, 401); return;
+    }
+    JsonDocument out;
+    out["place"]  = PLACE_NAMES[g_terminal ? 1 : 0];
+    out["time"]   = g_now ? (dateStrOf(g_now) + " " + timeStrOf(g_now)) : "";
+    out["plan"]   = g_planGuests;
+    out["visits"] = g_tVisits;
+    out["guests"] = g_todayIds.size();
+    out["denied"] = g_tDenied;
+    out["breach"] = g_tBreach;
+    JsonArray rows = out["rows"].to<JsonArray>();
+    File f = LittleFS.open("/log/" + g_dateStr + ".jsonl", "r");
+    if (f) {
+      while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() < 4) continue;
+        JsonDocument d;
+        if (deserializeJson(d, line)) continue;
+        String ev = d["event"] | "";
+        if (ev.startsWith("SYS_") || ev == "REPORT_SENT" || ev == "PASS" || ev == "GRACE_TIMEOUT")
+          continue;                              // оператору — только гостевые события
+        JsonObject r = rows.add<JsonObject>();
+        uint32_t ts = d["ts"] | 0;
+        r["tm"]     = ts ? timeStrOf(ts) : "";
+        r["id"]     = d["id"] | 0;
+        r["uid"]    = d["uid"] | "";
+        r["name"]   = d["name"] | "";
+        r["period"] = d["period"] | "";
+        r["event"]  = ev;
+      }
+      f.close();
+    }
+    sendJ(out);
+  });
+
+  // Счётчики «сегодня» для ВТОРОГО терминала (межтерминальный ключ).
+  server.on("/api/todaycount", HTTP_GET, []() {
+    if (server.header("X-Peer-Key") != g_peerKey) {
+      JsonDocument d; d["error"] = "bad key"; sendJ(d, 403); return;
+    }
+    JsonDocument out;
+    out["place"]  = PLACE_NAMES[g_terminal ? 1 : 0];
+    out["visits"] = g_tVisits;
+    out["guests"] = g_todayIds.size();
+    sendJ(out);
+  });
+
+  // Прокси: дашборд спрашивает у локального терминала счётчики второго зала.
+  server.on("/api/peertoday", HTTP_GET, []() {
+    if (needAuth()) return;
+    JsonDocument out;
+    String place; uint16_t visits = 0, guests = 0;
+    if (peerTodayCount(place, visits, guests)) {
+      out["ok"] = true; out["place"] = place;
+      out["visits"] = visits; out["guests"] = guests;
+    } else {
+      out["ok"] = false;
+    }
+    sendJ(out);
   });
 
   // Межтерминальная сверка: ключ вместо сессии

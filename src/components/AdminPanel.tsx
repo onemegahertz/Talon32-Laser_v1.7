@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_LOG, DEMO_CARDS, DEMO_DATES, EVENT_LABEL, SCHEDULE, LogRow } from "../data/site";
 import { SectionHead, Reveal } from "../ui";
 
-type Tab = "dash" | "log" | "report" | "cards" | "sched" | "net";
+type Tab = "dash" | "log" | "report" | "cards" | "sched" | "net" | "sys";
 const TABS: Array<{ id: Tab; t: string }> = [
   { id: "dash", t: "Дашборд" },
   { id: "log", t: "Журнал" },
@@ -10,6 +10,7 @@ const TABS: Array<{ id: Tab; t: string }> = [
   { id: "cards", t: "Карты" },
   { id: "sched", t: "Расписание" },
   { id: "net", t: "Сеть · Telegram · Почта" },
+  { id: "sys", t: "Система" },
 ];
 
 function pad2(x: number) { return x < 10 ? "0" + x : "" + x; }
@@ -92,6 +93,9 @@ export default function AdminPanel() {
   // расписание (локальная копия)
   const [sched, setSched] = useState(SCHEDULE.map((p) => ({ from: p.from, to: p.to })));
   const [regLeft, setRegLeft] = useState(0);
+  // план гостей и режим оператора (демо)
+  const [plan, setPlan] = useState(120);
+  const [opView, setOpView] = useState(false);
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000);
@@ -123,6 +127,15 @@ export default function AdminPanel() {
     const denied = todayRows.filter((r) => r.event.startsWith("DENIED")).length;
     const breach = todayRows.filter((r) => r.event === "BREACH").length;
     return { visits: visits.length, guests, denied, breach };
+  }, [todayRows]);
+
+  // проходы по залам (демо «столовая + ресторан» на одном экране)
+  const hall = useMemo(() => {
+    const v = todayRows.filter((r) => r.event === "VISIT");
+    return {
+      sto: v.filter((r) => r.place === "СТОЛОВАЯ").length,
+      res: v.filter((r) => r.place === "РЕСТОРАН").length,
+    };
   }, [todayRows]);
 
   const curPeriod = useMemo(() => {
@@ -234,6 +247,42 @@ export default function AdminPanel() {
                           <div className={`mt-1 font-mono text-3xl font-bold ${s.tone}`}>{s.v}</div>
                         </div>
                       ))}
+                    </div>
+
+                    {/* Прошло сегодня + план */}
+                    <div className="mt-4 grid gap-3 lg:grid-cols-[1.2fr_1fr]">
+                      <div className="border border-phos/40 bg-[#0d1710] p-4">
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-phos">Прошло сегодня (онлайн)</div>
+                        <div className="mt-3 flex flex-wrap items-end gap-x-10 gap-y-3">
+                          <div>
+                            <div className="font-mono text-4xl font-bold text-phos">{hall.sto}</div>
+                            <div className="mt-1 text-[11px] text-fog">столовая</div>
+                          </div>
+                          <div>
+                            <div className="font-mono text-4xl font-bold text-ice">{hall.res}</div>
+                            <div className="mt-1 text-[11px] text-fog">ресторан</div>
+                          </div>
+                          <div className="ml-auto text-right">
+                            <div className="font-mono text-4xl font-bold text-snow">{hall.sto + hall.res}</div>
+                            <div className="mt-1 text-[11px] text-fog">всего проходов</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="border border-line bg-panel2/70 p-4">
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-fog">План гостей на сегодня (справочно)</div>
+                        <div className="mt-3 flex items-center gap-3">
+                          <input type="number" min={0} value={plan}
+                            onChange={(e) => setPlan(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                            className="w-24 border border-line2 bg-panel px-3 py-2 font-mono text-lg text-snow outline-none focus:border-phos" />
+                          <button onClick={() => say("План сохранён (демо): " + plan)}
+                            className="border border-line2 px-4 py-2 font-mono text-[11px] font-bold uppercase text-snow hover:border-fog">Сохранить</button>
+                        </div>
+                        <div className="mt-3 text-[12px] text-fog">
+                          Осталось по плану:{" "}
+                          <span className="font-mono font-bold text-phos">{Math.max(0, plan - dash.guests)}</span>
+                          <span className="ml-2 text-fog/60">(план − уникальные гости)</span>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="mt-4 grid gap-3 lg:grid-cols-[1.2fr_1fr]">
@@ -394,7 +443,7 @@ export default function AdminPanel() {
                         className="btn-phos border border-phos bg-[#123524] px-4 py-2.5 font-mono text-[11px] font-bold uppercase tracking-wider text-phos">
                         ● Режим регистрации (30 с)
                       </button>
-                      <span className="text-[12px] text-fog">Номера выдаются автоматически: столовая — чётные, ресторан — нечётные.</span>
+                      <span className="text-[12px] text-fog">Нумерация сквозная (1, 2, 3…) и не зависит от зала. Контроль «одно место за период» — по уникальному UID карты.</span>
                     </div>
                     <div className="mt-4 overflow-x-auto border border-line">
                       <table className="w-full text-[12.5px]">
@@ -494,8 +543,8 @@ export default function AdminPanel() {
                       <input defaultValue="180" className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos" />
                       <label className="mt-2 block text-[10px] uppercase tracking-widest text-fog">Зал</label>
                       <select className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos">
-                        <option>СТОЛОВАЯ — чётные ID</option>
-                        <option>РЕСТОРАН — нечётные ID</option>
+                        <option>СТОЛОВАЯ</option>
+                        <option>РЕСТОРАН</option>
                       </select>
                       <button onClick={() => say("Параметры сохранены в NVS (демо)")} className="btn-phos mt-3 border border-line2 px-4 py-2 font-mono text-[11px] font-bold uppercase text-snow hover:border-fog">Сохранить</button>
                     </div>

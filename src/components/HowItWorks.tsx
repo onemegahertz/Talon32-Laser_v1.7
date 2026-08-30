@@ -5,7 +5,7 @@ const STEPS = [
   {
     n: "01",
     t: "Заселение — выдача карты",
-    d: "Гость получает карту Mifare на ресепшен. Админ вводит терминал в режим регистрации (кнопка или админ-карта) и подносит карту: прошивка сама выдаёт номер. Столовая — чётные ID, ресторан — нечётные: базы двух терминалов не пересекаются никогда.",
+    d: "Гость получает карту Mifare на ресепшен. Админ вводит терминал в режим регистрации (кнопка или админ-карта) и подносит карту: прошивка выдаёт сквозной номер 1, 2, 3… Номер — лишь метка гостя. Защита «одно место за период» строится на уникальном UID карты, поэтому двойной проход исключён независимо от нумерации.",
     tag: "RC522 · NVS",
   },
   {
@@ -125,22 +125,23 @@ export default function HowItWorks() {
 
           <Reveal dir="right" delay={180}>
             <div className="border border-line bg-panel p-5">
-              <h3 className="font-display text-sm font-bold text-snow">Почему ID не пересекаются</h3>
+              <h3 className="font-display text-sm font-bold text-snow">Сквозная нумерация и контроль по UID</h3>
               <div className="mt-3 grid grid-cols-2 gap-3 font-mono text-xs">
                 <div className="border border-line bg-panel2 p-3">
-                  <div className="text-[10px] uppercase tracking-widest text-phos">Столовая · чёт</div>
-                  <div className="mt-2 text-snow">2 · 4 · 6 · 8 · 10 …</div>
-                  <div className="mt-1 text-fog/70">id = счётчик × 2 + 0</div>
+                  <div className="text-[10px] uppercase tracking-widest text-phos">Номер карты</div>
+                  <div className="mt-2 text-snow">1 · 2 · 3 · 4 · 5 …</div>
+                  <div className="mt-1 text-fog/70">id = ++счётчик (сквозной)</div>
                 </div>
                 <div className="border border-line bg-panel2 p-3">
-                  <div className="text-[10px] uppercase tracking-widest text-ice">Ресторан · нечёт</div>
-                  <div className="mt-2 text-snow">3 · 5 · 7 · 9 · 11 …</div>
-                  <div className="mt-1 text-fog/70">id = счётчик × 2 + 1</div>
+                  <div className="text-[10px] uppercase tracking-widest text-ice">Контроль прохода</div>
+                  <div className="mt-2 text-snow">по UID карты</div>
+                  <div className="mt-1 text-fog/70">уникален у каждой карты</div>
                 </div>
               </div>
               <p className="mt-3 text-xs leading-relaxed text-fog">
-                Счётчики в терминалах независимы (оба стартуют с 1), но чётность номера жёстко привязана к залу —
-                коллизия исключена математически, а по номеру сразу видно, где выдана карта.
+                Номер — сквозной и не привязан к залу (так удобнее оператору). А правило «одно место за период»
+                проверяется по физическому UID карты, который неповторим, — значит двойной проход невозможен
+                при любой нумерации.
               </p>
             </div>
           </Reveal>
