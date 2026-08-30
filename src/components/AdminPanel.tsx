@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_LOG, DEMO_CARDS, DEMO_DATES, EVENT_LABEL, SCHEDULE, LogRow } from "../data/site";
 import { SectionHead, Reveal } from "../ui";
+import { downloadText } from "../utils/download";
 
 type Tab = "dash" | "log" | "report" | "cards" | "sched" | "net" | "sys";
 const TABS: Array<{ id: Tab; t: string }> = [
@@ -157,14 +158,15 @@ export default function AdminPanel() {
 
   function download(kind: "html" | "csv" | "txt") {
     const text = kind === "html" ? toHTML(repRows, repFrom, repTo) : kind === "csv" ? toCSV(repRows) : toTXT(repRows, repFrom, repTo);
-    const blob = new Blob([text], { type: kind === "csv" ? "text/csv;charset=utf-8" : kind === "html" ? "text/html;charset=utf-8" : "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "talon32_report_" + repFrom + "_" + repTo + "." + kind;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    say("Отчёт " + kind.toUpperCase() + " сформирован (" + repRows.length + " записей)");
+    const mime = kind === "csv" ? "text/csv;charset=utf-8" : kind === "html" ? "text/html;charset=utf-8" : "text/plain;charset=utf-8";
+    void downloadText("talon32_report_" + repFrom + "_" + repTo + "." + kind, text, mime).then((r: import("../utils/download").DownloadResult) => {
+      if (r === "cancelled") return;
+      say(
+        r === "copied"
+          ? "Скачивание заблокировано окном-превью — отчёт скопирован в буфер обмена"
+          : "Отчёт " + kind.toUpperCase() + " сформирован (" + repRows.length + " записей)"
+      );
+    });
   }
 
   return (

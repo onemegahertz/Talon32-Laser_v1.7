@@ -108,15 +108,31 @@ function Nav({ onDownload }: { onDownload: () => void }) {
 
 export default function App() {
   const download = useDownloadFirmware();
+  const [notice, setNotice] = useState("");
+
+  // Обёртка с обратной связью: если окно-превью блокирует сохранение
+  // файла, сообщаем, что код уже скопирован в буфер обмена.
+  const onDownload = async () => {
+    const r = await download();
+    if (r === "cancelled") return;
+    const msg =
+      r === "copied"
+        ? "Браузер заблокировал сохранение в окне-превью — код скопирован в буфер. В Arduino IDE: Ctrl+N, Ctrl+V, сохранить как Talon32.ino."
+        : r === "saved"
+        ? "Talon32.ino сохранён. Откройте его в Arduino IDE."
+        : "Скачивание Talon32.ino запущено…";
+    setNotice(msg);
+    setTimeout(() => setNotice(""), r === "copied" ? 8000 : 3500);
+  };
 
   return (
     <div className="relative min-h-screen">
       <div className="bg-stage" aria-hidden />
       <div className="bg-grid" aria-hidden />
       <div className="bg-noise" aria-hidden />
-      <Nav onDownload={download} />
+      <Nav onDownload={onDownload} />
       <main>
-        <Opening onDownload={download} />
+        <Opening onDownload={onDownload} />
         <div className="hair mx-auto max-w-7xl" />
         <HowItWorks />
         <div className="hair mx-auto max-w-7xl" />
@@ -130,6 +146,16 @@ export default function App() {
         <div className="hair mx-auto max-w-7xl" />
         <Docs />
       </main>
+
+      {notice && (
+        <div
+          className="fixed bottom-5 left-1/2 z-[70] w-[min(92vw,620px)] -translate-x-1/2 border border-phos/60 bg-[#0d1710] px-5 py-3.5 text-center font-mono text-[11.5px] leading-relaxed text-phos"
+          style={{ boxShadow: "0 14px 50px rgba(0,0,0,0.55)" }}
+          role="status"
+        >
+          {notice}
+        </div>
+      )}
     </div>
   );
 }

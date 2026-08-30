@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { FIRMWARE_CODE, FIRMWARE_FILE, FIRMWARE_VERSION } from "../data/firmware";
 import { FIXES } from "../data/site";
 import { SectionHead, Reveal, Kicker } from "../ui";
+import { copyText, downloadText, type DownloadResult } from "../utils/download";
 
 const KEYWORDS =
   /\b(void|bool|int|uint8_t|uint16_t|uint32_t|int8_t|int32_t|long|char|byte|float|String|const|static|struct|if|else|for|while|return|true|false|size_t|enum|case|switch|break|continue|class|new|delete|this|unsigned)\b/g;
@@ -84,40 +85,39 @@ function CodeView() {
   );
 }
 
+// Скачивание прошивки с защитой от «тихой» блокировки: если страница
+// открыта в окне-превью (iframe), браузер молча не сохраняет файл —
+// тогда утилита дополнительно копирует код в буфер и возвращает "copied",
+// чтобы интерфейс честно сказал пользователю, что произошло.
 export function useDownloadFirmware() {
-  return () => {
-    const blob = new Blob([FIRMWARE_CODE], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = FIRMWARE_FILE;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-  };
+  return () => downloadText(FIRMWARE_FILE, FIRMWARE_CODE, "text/plain;charset=utf-8");
 }
 
 export default function FirmwareSection() {
   const download = useDownloadFirmware();
   const [copied, setCopied] = useState(false);
+  const [dlState, setDlState] = useState<DownloadResult | "">("");
   const lineCount = useMemo(() => FIRMWARE_CODE.split("\n").length, []);
   const kb = useMemo(() => Math.round(new Blob([FIRMWARE_CODE]).size / 1024), []);
 
+  async function onDownload() {
+    const r = await download();
+    if (r === "cancelled") return;        // пользователь отменил диалог «Сохранить как»
+    setDlState(r);
+    setTimeout(() => setDlState(""), 6000);
+  }
+
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(FIRMWARE_CODE);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = FIRMWARE_CODE;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
-    }
+    await copyText(FIRMWARE_CODE);
     setCopied(true);
     setTimeout(() => setCopied(false), 2200);
   }
+
+  const dlLabel =
+    dlState === "saved" ? "✓ Файл сохранён"
+    : dlState === "started" ? "✓ Скачивание запущено"
+    : dlState === "copied" ? "⧉ Скопировано (см. ниже)"
+    : "↓ Скачать .ino";
 
   return (
     <section id="firmware" className="relative mx-auto max-w-7xl px-5 py-20 sm:px-8 lg:py-28">
@@ -150,10 +150,12 @@ export default function FirmwareSection() {
                 ))}
               </div>
               <button
-                onClick={download}
-                className="btn-phos mt-4 w-full border border-phos bg-[#123524] py-3 font-mono text-xs font-bold uppercase tracking-widest text-phos"
+                onClick={onDownload}
+                className={`btn-phos mt-4 w-full border py-3 font-mono text-xs font-bold uppercase tracking-widest transition-colors ${
+                  dlState ? "border-ice bg-[#12283a] text-ice" : "border-phos bg-[#123524] text-phos"
+                }`}
               >
-                ↓ Скачать .ino
+                {dlLabel}
               </button>
               <button
                 onClick={copy}
@@ -161,6 +163,19 @@ export default function FirmwareSection() {
               >
                 {copied ? "✓ Скопировано" : "Копировать в буфер"}
               </button>
+              {dlState === "copied" && (
+                <p className="mt-2 border border-ice/40 bg-ice/[0.07] px-3 py-2.5 font-mono text-[10.5px] leading-relaxed text-ice">
+                  Страница открыта в окне-превью — браузер заблокировал сохранение файла.
+                  Код уже в буфере обмена: в Arduino IDE создайте новый скетч (Ctrl+N),
+                  вставьте (Ctrl+V) и сохраните как Talon32.ino. Либо откройте сайт в обычной
+                  вкладке — там кнопка скачает файл напрямую.
+                </p>
+              )}
+              {dlState === "saved" && (
+                <p className="mt-2 border border-phos/40 bg-phos/[0.06] px-3 py-2.5 font-mono text-[10.5px] leading-relaxed text-phos">
+                  Файл сохранён через системный диалог «Сохранить как». Откройте его в Arduino IDE.
+                </p>
+              )}
               <p className="mt-3 border border-amber/35 bg-amber/[0.06] px-3 py-2.5 font-mono text-[10.5px] leading-relaxed text-amber/90">
                 Контроль чистоты артефакта: перед скачиванием из текста автоматически вырезаются
                 обратные кавычки и служебные символы JS-шаблона — в Arduino IDE попадает только
