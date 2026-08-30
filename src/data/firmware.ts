@@ -148,7 +148,9 @@ String   g_eIp, g_eGw, g_eSn;            // Ethernet: ip / шлюз / маска
 String   g_adminPass  = DEFAULT_PASS;
 String   g_tgToken, g_tgChat;            // Telegram
 String   g_smtpKey, g_senderEmail, g_emailTo; // e-mail (SMTP2GO)
-String   g_peerIp;                       // IP второго терминала
+String   g_peerList;                     // IP ДРУГИХ терминалов через запятую
+                                         // (столовая<->ресторан: друг друга;
+                                         //  ресепшен: оба зала для мониторинга)
 String   g_peerKey  = DEFAULT_PEER_KEY;
 int      g_tzMin    = 180;               // часовой пояс, мин (МСК = +180)
 uint8_t  g_terminal = 0;                 // 0 = СТОЛОВАЯ, 1 = РЕСТОРАН
@@ -178,6 +180,21 @@ std::vector<uint32_t> g_todayIds;        // уникальные гости
 uint16_t g_tVisits = 0, g_tDenied = 0, g_tBreach = 0;
 uint16_t g_tDeniedP[3] = {0, 0, 0};
 
+// --- Мониторинг других терминалов (ресепшен видит оба зала онлайн) ---
+/* Кэш счётчиков «сегодня» по каждому пиру. Обновляется ФОНОВОЙ задачей
+ * peerPollTask на ядре 0 раз в ~4 секунды, поэтому дашборд отдаёт цифры
+ * мгновенно и НЕ блокирует чтение карт / лазерный рубеж.             */
+struct PeerStat {
+  String   ip;
+  String   place;
+  uint16_t visits = 0;
+  uint16_t guests = 0;
+  bool     seen   = false;
+  uint32_t last   = 0;
+};
+std::vector<PeerStat> g_peers;
+SemaphoreHandle_t     g_peersMux = nullptr;   // защита вектора (задача + web)
+
 // безопасное имя текущего рабочего места (g_terminal = 0..2)
 /* ВАЖНО (фикс ошибки компиляции 'CardRec' does not name a type):
  * Arduino IDE автоматически генерирует прототипы всех функций и
@@ -206,7 +223,6 @@ bool     g_ethStarted = false;           // драйвер W5500 поднят (�
 uint32_t g_ethT0 = 0;                    // старт попытки Ethernet
 uint32_t g_ethLostT0 = 0;                // момент потери линка Ethernet
 bool     g_sntpOk = false;
-bool     g_peerSeen = false;
 uint32_t g_netRestartAt = 0, g_rebootAt = 0;
 
 // --- RFID антиповтор ---
@@ -237,7 +253,9 @@ IPAddress getLocalIP();
 void initEthernet();
 bool checkEthernet();
 void startNet();
-bool peerTodayCount(String& place, uint16_t& visits, uint16_t& guests);
+bool peerTodayCountOne(const String& ip, String& place, uint16_t& visits, uint16_t& guests);
+void rebuildPeers();
+void startPeerPoll();
 
 // ================== НЕБЛОКИРУЮЩИЙ ЗВУК =======================
 /* Паттерны: пары (вкл, выкл) в мс. Явные паузы гарантируют,
@@ -411,21 +429,42 @@ bool localVisited(const String& uid, int p) {
 }
 
 // ============== МЕЖТЕРМИНАЛЬНАЯ СВЕРКА (HTTP) ================
-/* Второй терминал опрашивается ДО вынесения вердикта: гость не
- * сможет «обмануть» систему, сходив сначала в столовую.
+/* Список пиров (g_peerList) — это IP ДРУГИХ терминалов через запятую:
+ * столовая и ресторан указывают друг друга, ресепшен — оба зала.
  * Работает и по Wi-Fi, и по Ethernet (оба — LwIP).            */
-bool peerVisited(const String& uid, int p, const String& dateStr) {
-  if (g_peerIp.length() < 7 || !netOnline()) return false;
+void rebuildPeers() {
+  std::vector<PeerStat> fresh;
+  String list = g_peerList;
+  int start = 0;
+  while (start <= (int)list.length()) {
+    int comma = list.indexOf(',', start);
+    String ip = (comma < 0) ? list.substring(start) : list.substring(start, comma);
+    ip.trim();
+    if (ip.length() >= 7) {
+      PeerStat ps; ps.ip = ip;
+      fresh.push_back(ps);
+    }
+    if (comma < 0) break;
+    start = comma + 1;
+  }
+  if (g_peersMux && xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+    g_peers = fresh;
+    xSemaphoreGive(g_peersMux);
+  } else {
+    g_peers = fresh;               // мьютекс ещё не создан (первый вызов из loadSettings)
+  }
+}
+/* Один HTTP-запрос к конкретному пиру: был ли uid в периоде p.        */
+static bool peerCheckOne(const String& ip, const String& uid, int p, const String& dateStr) {
   WiFiClient c;
-  if (!c.connect(g_peerIp.c_str(), 80)) { g_peerSeen = false; return false; }
-  g_peerSeen = true;
+  if (!c.connect(ip.c_str(), 80)) return false;
   String req = String("GET /api/check?uid=") + uid + "&date=" + dateStr +
-               "&period=" + p + " HTTP/1.0\r\nHost: " + g_peerIp +
+               "&period=" + p + " HTTP/1.0\r\nHost: " + ip +
                "\r\nX-Peer-Key: " + g_peerKey + "\r\nConnection: close\r\n\r\n";
   c.print(req);
   String resp;
   uint32_t t0 = millis();
-  while ((uint32_t)(millis() - t0) < 900) {
+  while ((uint32_t)(millis() - t0) < 600) {
     while (c.available()) {
       resp += (char)c.read();
       if (resp.length() > 2000) break;
@@ -437,21 +476,35 @@ bool peerVisited(const String& uid, int p, const String& dateStr) {
   c.stop();
   return resp.indexOf("\"visited\":true") >= 0;
 }
+/* Все пиры опрашиваются ДО вынесения вердикта: гость не сможет
+ * «обмануть» систему, сходив сначала в столовую.                     */
+bool peerVisited(const String& uid, int p, const String& dateStr) {
+  if (!netOnline() || g_peers.empty()) return false;
+  // снапшот IP под мьютексом — вектор может перестроиться из web-потока
+  String ips[8]; int n = 0;
+  if (g_peersMux && xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    for (size_t i = 0; i < g_peers.size() && n < 8; i++) ips[n++] = g_peers[i].ip;
+    xSemaphoreGive(g_peersMux);
+  }
+  for (int i = 0; i < n; i++) {
+    if (peerCheckOne(ips[i], uid, p, dateStr)) return true;   // найден хотя бы в одном зале
+  }
+  return false;
+}
 
-/* Запрос счётчиков «сегодня» у ВТОРОГО терминала — чтобы на дашборде
- * видеть проходы сразу и в столовой, и в ресторане. Авторизация по
- * межтерминальному ключу X-Peer-Key (как и сверка посещений).        */
-bool peerTodayCount(String& place, uint16_t& visits, uint16_t& guests) {
-  if (g_peerIp.length() < 7 || !netOnline()) return false;
+/* Запрос счётчиков «сегодня» у ОДНОГО терминала по IP — для онлайн-
+ * мониторинга залов (ресепшен видит и столовую, и ресторан).
+ * Авторизация по межтерминальному ключу X-Peer-Key.                  */
+bool peerTodayCountOne(const String& ip, String& place, uint16_t& visits, uint16_t& guests) {
+  if (!netOnline() || ip.length() < 7) return false;
   WiFiClient c;
-  if (!c.connect(g_peerIp.c_str(), 80)) { g_peerSeen = false; return false; }
-  g_peerSeen = true;
-  String req = String("GET /api/todaycount HTTP/1.0\r\nHost: ") + g_peerIp +
+  if (!c.connect(ip.c_str(), 80)) return false;
+  String req = String("GET /api/todaycount HTTP/1.0\r\nHost: ") + ip +
                "\r\nX-Peer-Key: " + g_peerKey + "\r\nConnection: close\r\n\r\n";
   c.print(req);
   String resp;
   uint32_t t0 = millis();
-  while ((uint32_t)(millis() - t0) < 900) {
+  while ((uint32_t)(millis() - t0) < 600) {
     while (c.available()) {
       resp += (char)c.read();
       if (resp.length() > 2000) break;
@@ -469,6 +522,45 @@ bool peerTodayCount(String& place, uint16_t& visits, uint16_t& guests) {
   visits = d["visits"] | 0;
   guests = d["guests"] | 0;
   return true;
+}
+
+/* ФОНОВАЯ задача опроса пиров (ядро 0, раз в ~4 с). Дашборд читает
+ * готовый кэш g_peers, поэтому онлайн-мониторинг залов не тормозит
+ * чтение карт и лазерный рубеж в loop().                             */
+void peerPollTask(void*) {
+  for (;;) {
+    if (netOnline() && !g_peers.empty()) {
+      String ips[8]; int n = 0;
+      if (xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+        for (size_t i = 0; i < g_peers.size() && n < 8; i++) ips[n++] = g_peers[i].ip;
+        xSemaphoreGive(g_peersMux);
+      }
+      for (int i = 0; i < n; i++) {
+        String place; uint16_t v = 0, g2 = 0;
+        bool ok = peerTodayCountOne(ips[i], place, v, g2);
+        if (xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+          for (size_t k = 0; k < g_peers.size(); k++) {
+            if (g_peers[k].ip != ips[i]) continue;
+            g_peers[k].seen = ok;
+            g_peers[k].last = millis();
+            if (ok) {
+              if (place.length()) g_peers[k].place = place;
+              g_peers[k].visits = v;
+              g_peers[k].guests = g2;
+            }
+            break;
+          }
+          xSemaphoreGive(g_peersMux);
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));      // пауза между запросами к разным пирам
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(4000));
+  }
+}
+void startPeerPoll() {
+  if (g_peersMux == nullptr) g_peersMux = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(peerPollTask, "peerpoll", 8192, nullptr, 1, nullptr, 0);
 }
 
 // ==================== РЕЕСТР КАРТ ============================
@@ -539,7 +631,12 @@ void loadSettings() {
   g_smtpKey     = prefs.getString("smtpkey", "");
   g_senderEmail = prefs.getString("sender", "talon32@notify.local");
   g_emailTo     = prefs.getString("mailto", "");
-  g_peerIp      = prefs.getString("peerip", "");
+  g_peerList    = prefs.getString("peers", "");
+  if (!g_peerList.length()) {
+    // миграция со старого одиночного поля «IP второго терминала»
+    String old = prefs.getString("peerip", "");
+    if (old.length()) { g_peerList = old; prefs.putString("peers", g_peerList); }
+  }
   g_peerKey     = prefs.getString("peerkey", DEFAULT_PEER_KEY);
   g_tzMin       = prefs.getInt("tz", 180);
   { // 0=СТОЛОВАЯ 1=РЕСТОРАН 2=РЕСЕПШЕН (с защитой от мусора в NVS)
@@ -560,6 +657,7 @@ void loadSettings() {
     }
     if (ok) for (int p = 0; p < 3; p++) { g_sched[p][0] = v[p*2]; g_sched[p][1] = v[p*2+1]; }
   }
+  rebuildPeers();                    // список пиров -> кэш g_peers
 }
 void saveSched() {
   String s;
@@ -1444,14 +1542,13 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
   </div>
 
   <div style="margin-top:16px;border:1px solid var(--ln);border-radius:10px;padding:12px 14px;background:var(--p2)">
-   <div class="k" style="margin-bottom:8px">Прошло сегодня (онлайн)</div>
-   <div style="display:flex;flex-wrap:wrap;gap:22px;align-items:baseline">
-     <div><span style="font-size:26px;font-weight:800;font-family:Consolas,monospace" id="dHere">0</span>
-       <span class="mut" id="dHerePlace" style="margin-left:6px">—</span></div>
-     <div><span style="font-size:26px;font-weight:800;font-family:Consolas,monospace" id="dPeerVisits">—</span>
-       <span class="mut" id="dPeerPlace" style="margin-left:6px">второй зал</span></div>
+   <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+     <div class="k">Прошло сегодня (онлайн)</div>
+     <span class="mut" style="font-size:11px">обновляется каждые ~4 с</span>
    </div>
-   <p class="mut" style="margin:8px 0 0">Счётчик второго зала берётся со второго терминала (нужен его IP во вкладке «Сеть»).</p>
+   <div id="dHalls" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
+   <p class="mut" style="margin:8px 0 0">Ресепшен видит столовую и ресторан в реальном времени; залы видят друг друга.
+   IP других терминалов задаются во вкладке «Сеть» через запятую.</p>
   </div>
 
   <div style="margin-top:14px;border:1px solid var(--ln);border-radius:10px;padding:12px 14px;background:var(--p2)">
@@ -1671,8 +1768,6 @@ function refresh(full){
     document.getElementById('dGuests').textContent = j.today.guests;
     document.getElementById('dDenied').textContent = j.today.denied;
     document.getElementById('dBreach').textContent = j.today.breach;
-    document.getElementById('dHere').textContent = j.today.visits;
-    document.getElementById('dHerePlace').textContent = j.place + ' (этот терминал)';
     document.getElementById('dPlan').setAttribute('placeholder', '0 = не задан');
     if (full) setVal('dPlan', String(j.plan || 0));
     document.getElementById('dPlanLeft').textContent =
@@ -1682,9 +1777,9 @@ function refresh(full){
     document.getElementById('dUp').textContent = j.uptime;
     document.getElementById('dIp').textContent = j.ip;
     document.getElementById('dHeap').textContent = j.heap;
-    document.getElementById('dPeer').textContent = j.peerIp
-      ? ('Второй терминал: ' + j.peerIp + ' — ' + (j.peerSeen ? 'НА СВЯЗИ' : 'НЕТ ОТВЕТА (решения по локальной базе)'))
-      : 'Второй терминал не настроен (поле «IP второго терминала» во вкладке «Сеть»).';
+    document.getElementById('dPeer').textContent = j.peers
+      ? ('Другие терминалы: ' + j.peers + ' — ' + (j.peerSeen ? 'НА СВЯЗИ' : 'НЕТ ОТВЕТА (решения по локальной базе)'))
+      : 'Другие терминалы не настроены (вкладка «Сеть», поле «IP других терминалов»).';
     document.getElementById('sysInfo').textContent =
       'LCD: ' + (j.lcdOk ? 'исправен' : 'НЕ НАЙДЕН (проверьте I2C)') +
       ' · Ethernet-линк: ' + (j.ethLink ? 'есть' : 'нет') +
@@ -2021,8 +2116,21 @@ void setupWeb() {
     j["dayReport"] = g_dayReportMin;
     j["tz"] = g_tzMin;
     j["laserInvert"] = g_laserInvert ? 1 : 0;
-    j["peerIp"] = g_peerIp;
-    j["peerSeen"] = g_peerSeen ? 1 : 0;
+    j["peers"] = g_peerList;                    // список IP других терминалов
+    { // статус каждого пира (есть ли связь) — из фонового кэша
+      JsonArray pa = j["peerArr"].to<JsonArray>();
+      bool anySeen = false;
+      if (g_peersMux && xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (size_t i = 0; i < g_peers.size(); i++) {
+          JsonObject po = pa.add<JsonObject>();
+          po["ip"] = g_peers[i].ip;
+          po["seen"] = g_peers[i].seen ? 1 : 0;
+          if (g_peers[i].seen) anySeen = true;
+        }
+        xSemaphoreGive(g_peersMux);
+      }
+      j["peerSeen"] = anySeen ? 1 : 0;
+    }
     j["heap"] = String(ESP.getFreeHeap() / 1024) + " КБ";
     uint32_t up = millis() / 1000;
     char ub[16]; snprintf(ub, sizeof(ub), "%02u:%02u:%02u",
@@ -2119,7 +2227,12 @@ void setupWeb() {
     JsonDocument in; deserializeJson(in, server.arg("plain"));
     JsonDocument out;
     bool ethChanged = false;
-    if (!in["peer"].isNull()) { g_peerIp = String(in["peer"] | ""); prefs.putString("peerip", g_peerIp); }
+    if (!in["peers"].isNull()) {
+      g_peerList = String(in["peers"] | "");
+      g_peerList.trim();
+      prefs.putString("peers", g_peerList);
+      rebuildPeers();               // кэш пиров обновится сразу
+    }
     if (!in["tz"].isNull()) { g_tzMin = in["tz"] | 180; prefs.putInt("tz", g_tzMin); }
     if (!in["terminal"].isNull()) {
       long t = in["terminal"] | -1;
@@ -2369,16 +2482,33 @@ void setupWeb() {
     sendJ(out);
   });
 
-  // Прокси: дашборд спрашивает у локального терминала счётчики второго зала.
-  server.on("/api/peertoday", HTTP_GET, []() {
+  // ОНЛАЙН-МОНИТОРИНГ ЗАЛОВ: локальный терминал + все пиры (из кэша
+  // фоновой задачи — отдаётся мгновенно, не блокирует чтение карт).
+  // Ресепшен видит и столовую, и ресторан; залы видят друг друга.
+  server.on("/api/halls", HTTP_GET, []() {
     if (needAuth()) return;
     JsonDocument out;
-    String place; uint16_t visits = 0, guests = 0;
-    if (peerTodayCount(place, visits, guests)) {
-      out["ok"] = true; out["place"] = place;
-      out["visits"] = visits; out["guests"] = guests;
-    } else {
-      out["ok"] = false;
+    JsonArray arr = out["halls"].to<JsonArray>();
+    // сам терминал
+    JsonObject self = arr.add<JsonObject>();
+    self["place"]  = placeName();
+    self["visits"] = g_tVisits;
+    self["guests"] = g_todayIds.size();
+    self["self"]   = 1;
+    self["seen"]   = 1;
+    // пиры из фонового кэша
+    if (g_peersMux && xSemaphoreTake(g_peersMux, pdMS_TO_TICKS(100)) == pdTRUE) {
+      for (size_t i = 0; i < g_peers.size(); i++) {
+        JsonObject o = arr.add<JsonObject>();
+        o["place"]  = g_peers[i].place.length() ? g_peers[i].place
+                                                : (String("Терминал ") + g_peers[i].ip);
+        o["visits"] = g_peers[i].visits;
+        o["guests"] = g_peers[i].guests;
+        o["self"]   = 0;
+        o["seen"]   = g_peers[i].seen ? 1 : 0;
+        o["ip"]     = g_peers[i].ip;
+      }
+      xSemaphoreGive(g_peersMux);
     }
     sendJ(out);
   });
@@ -2514,6 +2644,7 @@ void setup() {
 
   startNet();                       // Ethernet -> Wi-Fi -> точка (по сохранённому режиму)
   setupWeb();
+  startPeerPoll();                  // фоновой опрос пиров (мониторинг залов онлайн)
   beep(BEEP_BOOT, 5);
   lcdShow(isReception() ? "РЕСЕПШЕН: ВЫДАЧА" : "ГОТОВ К РАБОТЕ", placeName(), 3500);
   logEvent("SYS_BOOT", "", 0, String("v") + FW_VERSION, -1);
