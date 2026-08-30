@@ -106,8 +106,8 @@ export default function Docs() {
                 ТАЛОН-32 <span className="font-mono text-sm font-bold text-phos">v1.7</span>
               </div>
               <p className="mt-2 max-w-sm text-[12.5px] leading-relaxed text-fog">
-                RFID-учёт посетителей столовой и ресторана: ESP32 Dev Module · RC522 · Ethernet W5500 ·
-                LCD 1602 I2C (hd44780) · DS3231 · лазерный рубеж · Arduino Core 3.x.
+                RFID-учёт посетителей: 3 рабочих места (ресепшен · столовая · ресторан) на ESP32 Dev Module ·
+                RC522 · Ethernet W5500 · LCD 1602 (hd44780) · DS3231 · лазерный рубеж · Arduino Core 3.x.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {["Arduino Core 3.x", "Ethernet W5500", "hd44780", "LittleFS", "ArduinoJson v7", "SNTP", "SMTP2GO", "Telegram Bot API"].map((t) => (

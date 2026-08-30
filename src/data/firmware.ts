@@ -159,9 +159,19 @@ uint16_t g_planGuests = 0;               // план гостей на сего�
 String   g_operatorCode;                 // код доступа оператора (пусто = режим оператора выключен)
 bool     g_operatorMode = false;         // активен ли сейчас режим оператора (только чтение)
 
-static const char* PLACE_NAMES[2]  = { "СТОЛОВАЯ", "РЕСТОРАН" };
+/* ТРИ рабочих места (rev 3 терминала):
+ * 0 = СТОЛОВАЯ  — контроль прохода (одно место за период)
+ * 1 = РЕСТОРАН  — контроль прохода (одно место за период)
+ * 2 = РЕСЕПШЕН  — выдача карт + мониторинг (БЕЗ контроля питания)   */
+static const char* PLACE_NAMES[3]  = { "СТОЛОВАЯ", "РЕСТОРАН", "РЕСЕПШЕН" };
 static const char* PERIOD_NAMES[3] = { "ЗАВТРАК", "ОБЕД", "УЖИН" };
 static const char* WEEKDAYS_RU[7]  = { "ВС","ПН","ВТ","СР","ЧТ","ПТ","СБ" };
+
+// безопасное имя текущего рабочего места (g_terminal = 0..2)
+const char* placeName() {
+  return (g_terminal < 3) ? PLACE_NAMES[g_terminal] : PLACE_NAMES[0];
+}
+bool isReception() { return g_terminal == 2; }
 
 // --- Карты (реестр в LittleFS + копия в RAM) ---
 struct CardRec { String uid; uint32_t id; String name; bool admin; };
@@ -331,7 +341,7 @@ void logEvent(const char* ev, const String& uid, uint32_t id,
   doc["uid"]    = uid;
   doc["id"]     = id;
   doc["name"]   = name;
-  doc["place"]  = PLACE_NAMES[g_terminal ? 1 : 0];
+  doc["place"]  = placeName();
   doc["period"] = (periodIdx >= 0 && periodIdx < 3) ? PERIOD_NAMES[periodIdx] : "";
   String line; serializeJson(doc, line);
   String d = g_now ? dateStrOf(g_now) : String("1970-01-01");
@@ -526,7 +536,10 @@ void loadSettings() {
   g_peerIp      = prefs.getString("peerip", "");
   g_peerKey     = prefs.getString("peerkey", DEFAULT_PEER_KEY);
   g_tzMin       = prefs.getInt("tz", 180);
-  g_terminal    = prefs.getUChar("terminal", 0) ? 1 : 0;
+  { // 0=СТОЛОВАЯ 1=РЕСТОРАН 2=РЕСЕПШЕН (с защитой от мусора в NVS)
+    uint8_t t = prefs.getUChar("terminal", 0);
+    g_terminal = (t < 3) ? t : 0;
+  }
   g_laserInvert = prefs.getUChar("laserinv", 0) != 0;
   g_dayReportMin= prefs.getUShort("dayrep", 1260);
   g_planGuests  = prefs.getUShort("plan", 0);
@@ -604,9 +617,14 @@ void lcdDraw() {
         break;
       }
       default:
-        a = String("ЗАЛ:") + PLACE_NAMES[g_terminal ? 1 : 0];
-        b = String("ЛУЧ:") + (g_laser == LS_ARMED ? "ОХРАНА" :
-                             g_laser == LS_GRACE ? "ПРОХОД" : "ТРЕВОГА");
+        if (isReception()) {
+          a = String("РЕСЕПШЕН");
+          b = String("КАРТ В БАЗЕ:") + String(g_cards.size());
+        } else {
+          a = String("ЗАЛ:") + placeName();
+          b = String("ЛУЧ:") + (g_laser == LS_ARMED ? "ОХРАНА" :
+                               g_laser == LS_GRACE ? "ПРОХОД" : "ТРЕВОГА");
+        }
         break;
     }
   }
@@ -878,7 +896,7 @@ void denyVerdict(const String& lcd1, const char* ev, const String& uid,
    * зелёная лампа при ошибке больше не загорится.            */
   lampOn(1, 3000);                    // КРАСНАЯ
   beep(BEEP_ERR, 5);
-  lcdShow(lcd1, PLACE_NAMES[g_terminal ? 1 : 0], 3500);
+  lcdShow(lcd1, placeName(), 3500);
   logEvent(ev, uid, id, name, p);
 }
 
@@ -901,7 +919,38 @@ void processReg(const String& uid) {
   logEvent("CARD_REG", uid, id, c.name, -1);
 }
 
+/* ---------- РЕСЕПШЕН: выдача карт + мониторинг ----------
+ * Ресепшен НЕ контролирует питание (нет «одно место за период»).
+ * Его задачи: зарегистрировать новую карту и показать информацию
+ * о госте (мониторинг). Питание контролируют столовая и ресторан. */
+void handleReception(const String& uid) {
+  if (g_regUntil) { processReg(uid); return; }        // режим регистрации
+
+  CardRec* c = findCard(uid);
+  if (c && c->admin) { enterRegMode(); return; }      // админ-карта: сервис
+
+  if (antiRepeat(uid)) return;
+
+  if (!c) {
+    // незнакомая карта — предложить зарегистрировать
+    lampOn(2, 2000);                                  // оранжевая: внимание
+    beep(BEEP_WARN, 3);
+    lcdShow("НОВАЯ КАРТА", "РЕГИСТРАЦИЯ: КНОПКА", 4000);
+    logEvent("SCAN_NEW", uid, 0, "", -1);
+    return;
+  }
+
+  // карта известна — показать информацию о госте (мониторинг)
+  lampOn(0, 1200);                                    // короткая зелёная: опознан
+  beep(BEEP_OK, 1);
+  lcdShow(c->name.substring(0, 16),
+          "ID " + String(c->id) + "  В БАЗЕ", 4000);
+  logEvent("SCAN", uid, c->id, c->name, -1);
+}
+
 void handleCard(const String& uid) {
+  if (isReception()) { handleReception(uid); return; }  // ресепшен: своя логика
+
   if (g_regUntil) { processReg(uid); return; }        // сервисный режим
 
   CardRec* c = findCard(uid);
@@ -1031,7 +1080,7 @@ void tgHandleCommand(const String& text) {
     if (g_net == NET_ETH_ON)      netInfo = "Ethernet " + ETH.localIP().toString();
     else if (g_net == NET_STA_ON) netInfo = "Wi-Fi " + WiFi.localIP().toString();
     else                          netInfo = "резервная точка доступа";
-    String s = String(DEVICE_NAME) + " · " + PLACE_NAMES[g_terminal ? 1 : 0] +
+    String s = String(DEVICE_NAME) + " · " + placeName() +
                "\nВремя: " + (g_now ? dateStrOf(g_now) + " " + timeStrOf(g_now) : String("нет")) +
                "\nСеть: " + netInfo +
                "\nЛазер: " + laserName() +
@@ -1053,7 +1102,7 @@ void tgHandleCommand(const String& text) {
     }
     String csv = buildReport(d1, d2, "csv");
     tgSendDoc("talon32_" + d1 + "_" + d2 + ".csv", csv,
-              "Отчёт " + d1 + " — " + d2 + " (" + PLACE_NAMES[g_terminal ? 1 : 0] + ")");
+              "Отчёт " + d1 + " — " + d2 + " (" + placeName() + ")");
   }
 }
 void tgTick() {
@@ -1159,7 +1208,7 @@ String buildReport(const String& fromS, const String& toS, const String& fmt) {
     f.close();
   }
 
-  String place = PLACE_NAMES[g_terminal ? 1 : 0];
+  String place = placeName();
 
   if (fmt == "csv") {
     String s = "\xEF\xBB\xBF";   // BOM для Excel
@@ -1243,7 +1292,7 @@ String periodLine(int p) {
     for (size_t k = 0; k < ids.size(); k++) if (ids[k] == g_today[i].id) { seen = true; break; }
     if (!seen) ids.push_back(g_today[i].id);
   }
-  return String("[") + DEVICE_NAME + " · " + PLACE_NAMES[g_terminal ? 1 : 0] + "] " +
+  return String("[") + DEVICE_NAME + " · " + placeName() + "] " +
          PERIOD_NAMES[p] + " (" + minToStr(g_sched[p][0]) + "-" + minToStr(g_sched[p][1]) +
          ") завершён: посещений " + String(visits) + ", гостей " + String(ids.size()) +
          ", отказов " + String(g_tDeniedP[p]) + ", нарушений луча " + String(g_tBreach);
@@ -1257,13 +1306,13 @@ void sendDailyReport() {
   String d = g_dateStr;
   String csv = buildReport(d, d, "csv");
   String html = buildReport(d, d, "html");
-  String head = String("[") + DEVICE_NAME + " · " + PLACE_NAMES[g_terminal ? 1 : 0] +
+  String head = String("[") + DEVICE_NAME + " · " + placeName() +
                 "] Итог дня " + d + ": посещений " + String(g_tVisits) + ", гостей " +
                 String(g_todayIds.size()) + ", отказов " + String(g_tDenied) +
                 ", нарушений " + String(g_tBreach) + ". CSV приложен.";
   tgSend(head);
   tgSendDoc("talon32_" + d + ".csv", csv, "Суточный отчёт " + d);
-  mailSend("Талон-32 · Отчёт за " + d + " (" + PLACE_NAMES[g_terminal ? 1 : 0] + ")",
+  mailSend("Талон-32 · Отчёт за " + d + " (" + placeName() + ")",
            html, head);
   logEvent("REPORT_SENT", "", 0, head, -1);
 }
@@ -1491,7 +1540,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><label>Часовой пояс, минут от UTC (МСК = 180)</label><input id="nTz" type="number"></div>
   </div>
   <div class="row">
-   <div><label>Терминал</label><select id="nTerm"><option value="0">СТОЛОВАЯ</option><option value="1">РЕСТОРАН</option></select></div>
+   <div><label>Рабочее место</label><select id="nTerm"><option value="0">СТОЛОВАЯ (контроль прохода)</option><option value="1">РЕСТОРАН (контроль прохода)</option><option value="2">РЕСЕПШЕН (выдача карт + мониторинг)</option></select></div>
    <div><label>Лазерный приёмник</label><select id="nLaser"><option value="0">Обычный (луч прерван = HIGH)</option><option value="1">Инверсный (луч прерван = LOW)</option></select></div>
   </div>
   <button class="btn" id="nSave">Сохранить параметры</button>
@@ -1923,7 +1972,7 @@ void setupWeb() {
     if (needAuth()) return;
     JsonDocument j;
     j["v"] = FW_VERSION;
-    j["place"] = PLACE_NAMES[g_terminal ? 1 : 0];
+    j["place"] = placeName();
     j["terminal"] = g_terminal;
     j["time"] = g_now ? (dateStrOf(g_now) + " " + timeStrOf(g_now)) : "";
     j["wifiMode"] = g_net == NET_STA_ON ? "STA" :
@@ -2067,7 +2116,9 @@ void setupWeb() {
     if (!in["peer"].isNull()) { g_peerIp = String(in["peer"] | ""); prefs.putString("peerip", g_peerIp); }
     if (!in["tz"].isNull()) { g_tzMin = in["tz"] | 180; prefs.putInt("tz", g_tzMin); }
     if (!in["terminal"].isNull()) {
-      g_terminal = (in["terminal"] | 0) ? 1 : 0;
+      long t = in["terminal"] | -1;
+      if (t < 0 || t > 2) { out["ok"]=false; out["error"]="терминал: 0/1/2"; sendJ(out); return; }
+      g_terminal = (uint8_t)t;                        // 0=СТОЛОВАЯ 1=РЕСТОРАН 2=РЕСЕПШЕН
       prefs.putUChar("terminal", g_terminal);
     }
     if (!in["invert"].isNull()) {
@@ -2135,7 +2186,7 @@ void setupWeb() {
     if (needAuth()) return;
     JsonDocument out;
     bool ok = tgSend(String(DEVICE_NAME) + " v" + FW_VERSION + " · тестовое сообщение. Терминал: " +
-                     PLACE_NAMES[g_terminal ? 1 : 0]);
+                     placeName());
     out["ok"] = ok;
     if (!ok) out["error"] = "нет связи с Telegram";
     sendJ(out);
@@ -2267,7 +2318,7 @@ void setupWeb() {
       JsonDocument d; d["error"] = "unauthorized"; sendJ(d, 401); return;
     }
     JsonDocument out;
-    out["place"]  = PLACE_NAMES[g_terminal ? 1 : 0];
+    out["place"]  = placeName();
     out["time"]   = g_now ? (dateStrOf(g_now) + " " + timeStrOf(g_now)) : "";
     out["plan"]   = g_planGuests;
     out["visits"] = g_tVisits;
@@ -2306,7 +2357,7 @@ void setupWeb() {
       JsonDocument d; d["error"] = "bad key"; sendJ(d, 403); return;
     }
     JsonDocument out;
-    out["place"]  = PLACE_NAMES[g_terminal ? 1 : 0];
+    out["place"]  = placeName();
     out["visits"] = g_tVisits;
     out["guests"] = g_todayIds.size();
     sendJ(out);
@@ -2407,7 +2458,8 @@ void setup() {
     lcd.setCursor(0, 1); lcd.print("ЗАПУСК...");
   }
 
-  // Удержание кнопки при старте = смена зала (СТОЛОВАЯ <-> РЕСТОРАН)
+  // Удержание кнопки при старте = смена рабочего места
+  // (по кругу: СТОЛОВАЯ -> РЕСТОРАН -> РЕСЕПШЕН -> СТОЛОВАЯ ...)
   uint32_t bt0 = millis();
   bool held = true;
   while ((uint32_t)(millis() - bt0) < 1500) {
@@ -2415,12 +2467,12 @@ void setup() {
     delay(20);
   }
   if (held) {
-    g_terminal = g_terminal ? 0 : 1;
+    g_terminal = (g_terminal + 1) % 3;            // 0 -> 1 -> 2 -> 0
     prefs.putUChar("terminal", g_terminal);
     if (g_lcdOk) {
       lcd.clear();
-      lcd.setCursor(0, 0); lcd.print("ЗАЛ ИЗМЕНЁН:");
-      lcd.setCursor(0, 1); lcd.print(PLACE_NAMES[g_terminal ? 1 : 0]);
+      lcd.setCursor(0, 0); lcd.print(isReception() ? "РЕЖИМ:" : "ЗАЛ ИЗМЕНЁН:");
+      lcd.setCursor(0, 1); lcd.print(placeName());
     }
     delay(1800);
   }
@@ -2457,7 +2509,7 @@ void setup() {
   startNet();                       // Ethernet -> Wi-Fi -> точка (по сохранённому режиму)
   setupWeb();
   beep(BEEP_BOOT, 5);
-  lcdShow("ГОТОВ К РАБОТЕ", PLACE_NAMES[g_terminal ? 1 : 0], 3500);
+  lcdShow(isReception() ? "РЕСЕПШЕН: ВЫДАЧА" : "ГОТОВ К РАБОТЕ", placeName(), 3500);
   logEvent("SYS_BOOT", "", 0, String("v") + FW_VERSION, -1);
 }
 

@@ -543,8 +543,9 @@ export default function AdminPanel() {
                       <input defaultValue="180" className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos" />
                       <label className="mt-2 block text-[10px] uppercase tracking-widest text-fog">Зал</label>
                       <select className="mt-1 w-full border border-line2 bg-panel px-3 py-2 font-mono text-sm text-snow outline-none focus:border-phos">
-                        <option>СТОЛОВАЯ</option>
-                        <option>РЕСТОРАН</option>
+                        <option>СТОЛОВАЯ — контроль прохода</option>
+                        <option>РЕСТОРАН — контроль прохода</option>
+                        <option>РЕСЕПШЕН — выдача карт + мониторинг</option>
                       </select>
                       <button onClick={() => say("Параметры сохранены в NVS (демо)")} className="btn-phos mt-3 border border-line2 px-4 py-2 font-mono text-[11px] font-bold uppercase text-snow hover:border-fog">Сохранить</button>
                     </div>
