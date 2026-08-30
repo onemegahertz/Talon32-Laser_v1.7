@@ -167,12 +167,6 @@ static const char* PLACE_NAMES[3]  = { "СТОЛОВАЯ", "РЕСТОРАН", "
 static const char* PERIOD_NAMES[3] = { "ЗАВТРАК", "ОБЕД", "УЖИН" };
 static const char* WEEKDAYS_RU[7]  = { "ВС","ПН","ВТ","СР","ЧТ","ПТ","СБ" };
 
-// безопасное имя текущего рабочего места (g_terminal = 0..2)
-const char* placeName() {
-  return (g_terminal < 3) ? PLACE_NAMES[g_terminal] : PLACE_NAMES[0];
-}
-bool isReception() { return g_terminal == 2; }
-
 // --- Карты (реестр в LittleFS + копия в RAM) ---
 struct CardRec { String uid; uint32_t id; String name; bool admin; };
 std::vector<CardRec> g_cards;
@@ -183,6 +177,18 @@ std::vector<VisitRec> g_today;
 std::vector<uint32_t> g_todayIds;        // уникальные гости
 uint16_t g_tVisits = 0, g_tDenied = 0, g_tBreach = 0;
 uint16_t g_tDeniedP[3] = {0, 0, 0};
+
+// безопасное имя текущего рабочего места (g_terminal = 0..2)
+/* ВАЖНО (фикс ошибки компиляции 'CardRec' does not name a type):
+ * Arduino IDE автоматически генерирует прототипы всех функций и
+ * вставляет их ПЕРЕД ПЕРВОЙ функцией файла. Если функция стоит РАНЬШЕ
+ * объявления struct, то автопрототип "CardRec* findCard(...);" попадает
+ * ДО "struct CardRec" и компиляция падает. Поэтому ОБЕ функции-помощника
+ * ОБЯЗАНЫ идти ПОСЛЕ struct CardRec / struct VisitRec (см. выше).      */
+const char* placeName() {
+  return (g_terminal < 3) ? PLACE_NAMES[g_terminal] : PLACE_NAMES[0];
+}
+bool isReception() { return g_terminal == 2; }
 
 // --- Время ---
 bool     g_rtcOk = false;
