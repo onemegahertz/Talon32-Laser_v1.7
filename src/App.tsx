@@ -91,19 +91,36 @@ function useReveal<T extends HTMLElement>(threshold = 0.12) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+
+    // Если наблюдатель недоступен — показываем сразу, без анимации
+    if (!("IntersectionObserver" in window)) {
+      setShown(true);
+      return;
+    }
+
+    // ГАРАНТИРОВАННЫЙ фолбэк: даже если IntersectionObserver не сработает
+    // (iframe / песочница предпросмотра), контент появится максимум через 900 мс.
+    // Без него секции с предпросмотром могли остаться прозрачными навсегда.
+    const fallback = window.setTimeout(() => setShown(true), 900);
+
     const io = new IntersectionObserver(
       (entries) => {
         entries.forEach((e) => {
           if (e.isIntersecting) {
             setShown(true);
             io.disconnect();
+            window.clearTimeout(fallback);
           }
         });
       },
       { threshold },
     );
     io.observe(el);
-    return () => io.disconnect();
+
+    return () => {
+      io.disconnect();
+      window.clearTimeout(fallback);
+    };
   }, [threshold]);
   return { ref, shown };
 }
