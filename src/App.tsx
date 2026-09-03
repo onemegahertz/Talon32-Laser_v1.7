@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BOM_FILE, DOCS, WIRING_FILE, type DocMeta } from "./data/documents";
+import { DOCS, type DocMeta } from "./data/documents";
 
 /* ------------------------------------------------------------------ */
 /*  Иконки (inline SVG, без внешних библиотек)                          */
@@ -186,11 +186,15 @@ function CopyButton({ text }: { text: string }) {
 /* ------------------------------------------------------------------ */
 /*  Предпросмотр документа                                              */
 /* ------------------------------------------------------------------ */
+const ACCENT_TEXT: Record<DocMeta["accent"], string> = { amber: "text-amber", cyan: "text-cyan", red: "text-red" };
+const ACCENT_BORDER: Record<DocMeta["accent"], string> = { amber: "border-amber/50", cyan: "border-cyan/50", red: "border-red/50" };
+const ACCENT_BG: Record<DocMeta["accent"], string> = { amber: "bg-amber", cyan: "bg-cyan", red: "bg-red" };
+
 function Preview({ doc }: { doc: DocMeta }) {
   const [expanded, setExpanded] = useState(false);
   const stats = useMemo(() => textStats(doc.text), [doc]);
-  const accentText = doc.accent === "amber" ? "text-amber" : "text-cyan";
-  const accentBorder = doc.accent === "amber" ? "border-amber/50" : "border-cyan/50";
+  const accentText = ACCENT_TEXT[doc.accent];
+  const accentBorder = ACCENT_BORDER[doc.accent];
 
   return (
     <div className={"overflow-hidden border bg-deep/80 " + accentBorder}>
@@ -226,7 +230,7 @@ function Preview({ doc }: { doc: DocMeta }) {
         )}
         {/* бегущая линия сканирования */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div className={"h-10 w-full opacity-[0.05] animate-scan " + (doc.accent === "amber" ? "bg-amber" : "bg-cyan")} />
+          <div className={"h-10 w-full opacity-[0.05] animate-scan " + ACCENT_BG[doc.accent]} />
         </div>
       </div>
 
@@ -251,7 +255,7 @@ function Preview({ doc }: { doc: DocMeta }) {
 /* ------------------------------------------------------------------ */
 function DocSection({ doc, index }: { doc: DocMeta; index: number }) {
   const { ref, shown } = useReveal<HTMLElement>();
-  const accentText = doc.accent === "amber" ? "text-amber" : "text-cyan";
+  const accentText = ACCENT_TEXT[doc.accent];
 
   return (
     <section ref={ref} className={"reveal " + (shown ? "is-shown" : "")}>
@@ -380,13 +384,10 @@ function FlowStrip() {
 /*  Приложение                                                          */
 /* ------------------------------------------------------------------ */
 export default function App() {
-  const bom = DOCS[0];
-  const wiring = DOCS[1];
   const hero = useReveal<HTMLDivElement>(0.05);
 
-  const downloadBoth = () => {
-    downloadText(BOM_FILE, bom.text);
-    setTimeout(() => downloadText(WIRING_FILE, wiring.text), 350);
+  const downloadAll = () => {
+    DOCS.forEach((d, i) => setTimeout(() => downloadText(d.file, d.text), i * 350));
   };
 
   return (
@@ -414,11 +415,11 @@ export default function App() {
             Ресепшен · Столовая · Ресторан
           </span>
           <button
-            onClick={downloadBoth}
+            onClick={downloadAll}
             className="inline-flex items-center gap-2 border border-cyan/70 bg-cyan/10 px-3 py-1.5 font-mono text-[11px] font-semibold text-cyan transition-all duration-200 hover:bg-cyan hover:text-ink hover:shadow-[0_0_24px_rgba(86,215,232,0.35)]"
           >
             {Icon.download}
-            <span className="hidden sm:inline">Оба файла</span>
+            <span className="hidden sm:inline">Все 3 файла</span>
           </button>
         </div>
       </header>
@@ -439,17 +440,19 @@ export default function App() {
               без ошибок.
             </h1>
             <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-fog">
-              Два готовых текстовых файла: что купить (ведомость комплектующих с пересчётом на 3 рабочих места) и как
-              соединить (монтажная схема с таблицей GPIO). Скачивайте, печатайте, держите на верстаке.
+              Три готовых файла: что купить (ведомость комплектующих с пересчётом на 3 рабочих места), как соединить
+              (монтажная схема с таблицей GPIO) и чем проверить (диагностический скетч для Монитора порта).
+              Скачивайте, печатайте, держите на верстаке.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              <DownloadButton file={BOM_FILE} text={bom.text} />
-              <DownloadButton file={WIRING_FILE} text={wiring.text} />
+              {DOCS.map((d) => (
+                <DownloadButton key={d.key} file={d.file} text={d.text} />
+              ))}
             </div>
             <div className="mt-8 flex flex-wrap gap-x-8 gap-y-3 font-mono text-[11px] uppercase tracking-wider text-mist">
               <span><span className="text-green">●</span> 18 позиций</span>
               <span><span className="text-amber">●</span> 18 GPIO</span>
-              <span><span className="text-cyan">●</span> UTF-8 · BOM</span>
+              <span><span className="text-cyan">●</span> 6 тестов узлов</span>
             </div>
           </div>
           <TitleBlock />
@@ -457,8 +460,9 @@ export default function App() {
 
         {/* документы */}
         <div className="mt-20 space-y-16">
-          <DocSection doc={bom} index={1} />
-          <DocSection doc={wiring} index={2} />
+          {DOCS.map((d, i) => (
+            <DocSection key={d.key} doc={d} index={i + 1} />
+          ))}
         </div>
 
         {/* порядок сборки */}
@@ -470,7 +474,7 @@ export default function App() {
       <footer className="relative border-t border-line bg-deep/60">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-5 py-6">
           <span className="font-mono text-[11px] text-mist">
-            Талон-32 v1.7 · RFID-учёт посетителей · {BOM_FILE} + {WIRING_FILE}
+            Талон-32 v1.7 · RFID-учёт посетителей · {DOCS.map((d) => d.file).join(" + ")}
           </span>
           <span className="ml-auto font-mono text-[11px] text-mist">
             Arduino Core 3.x · ESP32 + RC522 + W5500

@@ -7,6 +7,7 @@ const r = "───────────────────────
 
 export const BOM_FILE = "Talon32_BOM.txt";
 export const WIRING_FILE = "Talon32_Wiring.txt";
+export const DIAG_FILE = "Talon32_Diag.ino";
 
 export const BOM_TEXT = `${R}
   ТАЛОН-32 v1.7 — ВЕДОМОСТЬ КОМПЛЕКТУЮЩИХ (НА 3 ТЕРМИНАЛА)
@@ -286,12 +287,198 @@ ${R}
 ${R}
 `;
 
+export const DIAG_TEXT = `${R}
+  ТАЛОН-32 v1.7 — ДИАГНОСТИЧЕСКИЙ СКЕТЧ (Talon32_Diag.ino)
+  Автономная проверка ВСЕХ узлов терминала через Монитор порта (115200).
+  Залейте его ВМЕСТО основной прошивки, если что-то не работает.
+${R}
+
+КАК ПОЛЬЗОВАТЬСЯ
+  1. Откройте Arduino IDE, создайте новый скетч, вставьте этот код целиком.
+  2. Установите библиотеки: hd44780, RTClib, MFRC522 (Менеджер библиотек).
+  3. Плата: ESP32 Dev Module · Схема: Default 4MB with spiffs.
+  4. Залейте и откройте Монитор порта на 115200 бод.
+  5. Скетч сам прогонит все тесты и напечатает вердикт по каждому узлу.
+
+${r}
+// ============================================================
+//  TALON-32 DIAG — автономная диагностика терминала
+//  Платформа: ESP32 Dev Module · Arduino Core 3.x
+// ============================================================
+#include <Wire.h>
+#include <SPI.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_I2Cexp.h>
+#include <RTClib.h>
+#include <MFRC522.h>
+
+// --- Пины (идентичны основной прошивке) ---
+const int PIN_SPI_SCK  = 18;   // VSPI  (RC522)
+const int PIN_SPI_MISO = 19;
+const int PIN_SPI_MOSI = 23;
+const int PIN_RFID_SS  = 5;
+const int PIN_RFID_RST = 4;
+const int PIN_SDA      = 21;   // I2C   (LCD + DS3231)
+const int PIN_SCL      = 22;
+const int PIN_LASER_RX = 32;
+const int PIN_BTN      = 33;
+const int PIN_LED_G    = 26;
+const int PIN_LED_R    = 27;
+const int PIN_LED_Y    = 14;
+const int PIN_BUZZ     = 13;
+
+hd44780_I2Cexp lcd;
+RTC_DS3231 rtc;
+MFRC522 rfid(PIN_RFID_SS, PIN_RFID_RST);
+
+int fails = 0;
+
+void hdr(const char* s) { Serial.println(); Serial.println(s); }
+void ok_(const char* s)  { Serial.print(F("  [OK]   ")); Serial.println(s); }
+void bad(const char* s)  { Serial.print(F("  [FAIL] ")); Serial.println(s); fails++; }
+
+// ---------- 1. Шина I2C ----------
+void testI2C() {
+  hdr("--- 1. ШИНА I2C (SDA=21, SCL=22) ---");
+  Wire.begin(PIN_SDA, PIN_SCL);
+  int n = 0;
+  for (uint8_t a = 8; a < 120; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      n++;
+      Serial.print(F("  найден адрес 0x")); Serial.print(a < 16 ? "0" : "");
+      Serial.print(a, HEX);
+      if (a == 0x68) Serial.print(F("  (RTC DS3231)"));
+      if (a == 0x27 || a == 0x3F) Serial.print(F("  (LCD I2C)"));
+      Serial.println();
+    }
+  }
+  if (n == 0) bad("на шине I2C НЕТ устройств. Проверьте SDA/SCL, питание 5V/GND.");
+  else ok_("устройств на шине: " + String(n));
+}
+
+// ---------- 2. LCD ----------
+void testLCD() {
+  hdr("--- 2. LCD 1602 I2C (hd44780) ---");
+  int st = lcd.begin(16, 2);
+  if (st == 0) {
+    ok_("LCD инициализирован, адрес определён автоматически");
+    lcd.backlight();
+    lcd.print("TALON DIAG OK");
+  } else {
+    bad("lcd.begin() вернул ошибку " + String(st) + ". Проверьте переходник I2C и питание VIN.");
+  }
+}
+
+// ---------- 3. RTC DS3231 ----------
+void testRTC() {
+  hdr("--- 3. RTC DS3231 ---");
+  if (!rtc.begin()) { bad("DS3231 не отвечает по I2C (адрес 0x68)."); return; }
+  DateTime now = rtc.now();
+  Serial.println(F("  время модуля: ") + String(now.year()) + "-" + String(now.month()) + "-" + String(now.day())
+                 + " " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
+  if (rtc.lostPower())      bad("DS3231 отвечает, но lostPower=true — села/отсутствует батарейка CR2032.");
+  else if (now.year() < 2024) bad("DS3231 отвечает, но время сбито (год < 2024). Замените батарейку.");
+  else ok_("DS3231 в норме, время достоверно");
+}
+
+// ---------- 4. RC522 ----------
+void testRFID() {
+  hdr("--- 4. RC522 (SPI: SCK=18 MISO=19 MOSI=23 CS=5 RST=4) ---");
+  SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
+  rfid.PCD_Init();
+  byte ver = rfid.PCD_ReadRegister(rfid.VersionReg);
+  Serial.print(F("  VersionReg = 0x")); Serial.println(ver < 16 ? "0" + String(ver, HEX) : String(ver, HEX));
+  if (ver == 0x00 || ver == 0xFF)
+    bad("RC522 НЕ отвечает. ПИТАНИЕ ТОЛЬКО 3.3V! Проверьте SPI-провода и CS=5.");
+  else {
+    ok_("RC522 отвечает");
+    Serial.println(F("  Поднесите карту к считывателю в течение 5 секунд..."));
+    uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < 5000) {
+      if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+        String uid;
+        for (byte i = 0; i < rfid.uid.size; i++) {
+          if (rfid.uid.uidByte[i] < 16) uid += "0";
+          uid += String(rfid.uid.uidByte[i], HEX);
+        }
+        uid.toUpperCase();
+        ok_("КАРТА СЧИТАНА! UID = " + uid);
+        rfid.PICC_HaltA();
+        return;
+      }
+    }
+    Serial.println(F("  карта за 5 с не поднесена (или не читается)."));
+  }
+}
+
+// ---------- 5. Лазерный приёмник ----------
+void testLaser() {
+  hdr("--- 5. Лазерный рубеж (приёмник GPIO32) ---");
+  pinMode(PIN_LASER_RX, INPUT);
+  int v = digitalRead(PIN_LASER_RX);
+  Serial.println(String(F("  уровень на входе: ")) + (v ? "HIGH" : "LOW"));
+  Serial.println(F("  [подсказка] луч НЕ пересечён -> обычно HIGH; пересечён -> LOW"));
+  ok_("вход читается, сверьте с реальным лучом");
+}
+
+// ---------- 6. Кнопка и индикация ----------
+void testIO() {
+  hdr("--- 6. Кнопка (GPIO33) + LED + buzzer ---");
+  pinMode(PIN_BTN, INPUT_PULLUP);
+  pinMode(PIN_LED_G, OUTPUT); pinMode(PIN_LED_R, OUTPUT); pinMode(PIN_LED_Y, OUTPUT);
+  pinMode(PIN_BUZZ, OUTPUT);
+  Serial.println(F("  Зажмите кнопку на 3 секунды (регистрации)..."));
+  uint32_t t0 = millis(); bool pressed = false;
+  while ((uint32_t)(millis() - t0) < 3000) {
+    if (digitalRead(PIN_BTN) == LOW) { pressed = true; break; }
+    delay(10);
+  }
+  if (pressed) ok_("кнопка работает");
+  else bad("кнопка не нажата/не подключена (GPIO33 -> кнопка -> GND)");
+
+  Serial.println(F("  Мигаю LED (зелёный->красный->жёлтый) и гудю — проверите глазами/ухом:"));
+  const int leds[3] = { PIN_LED_G, PIN_LED_R, PIN_LED_Y };
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(leds[i], HIGH); delay(400); digitalWrite(leds[i], LOW);
+  }
+  digitalWrite(PIN_BUZZ, HIGH); delay(300); digitalWrite(PIN_BUZZ, LOW);
+  ok_("индикация протестирована");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.println(F("==============================================="));
+  Serial.println(F("  TALON-32 DIAG · автономная диагностика"));
+  Serial.println(F("==============================================="));
+  testI2C();
+  testLCD();
+  testRTC();
+  testRFID();
+  testLaser();
+  testIO();
+
+  hdr("=================== ИТОГ ======================");
+  if (fails == 0) Serial.println(F("  ВСЕ УЗЛЫ В НОРМЕ."));
+  else            Serial.println(F("  Обнаружено неисправных узлов: ") + String(fails) + F(". Смотрите [FAIL] выше."));
+  Serial.println(F("  После диагностики залейте основную прошивку Talon32.ino."));
+  Serial.println(F("==============================================="));
+}
+
+void loop() { }
+${R}
+  Конец документа · ${DIAG_FILE}
+${R}
+`;
+
 export interface DocMeta {
-  key: "bom" | "wiring";
+  key: "bom" | "wiring" | "diag";
   file: string;
   title: string;
   subtitle: string;
-  accent: "amber" | "cyan";
+  accent: "amber" | "cyan" | "red";
   text: string;
   points: string[];
 }
@@ -314,5 +501,14 @@ export const DOCS: DocMeta[] = [
     accent: "cyan",
     text: WIRING_TEXT,
     points: ["8 монтажных блоков", "таблица GPIO", "ASCII-схема"],
+  },
+  {
+    key: "diag",
+    file: DIAG_FILE,
+    title: "Диагностический скетч",
+    subtitle: "Если что-то не работает: залейте этот скетч, откройте Монитор порта (115200) — он проверит каждый узел и напечатает вердикт.",
+    accent: "red",
+    text: DIAG_TEXT,
+    points: ["6 тестов узлов", "Монитор порта", "вердикт по каждому"],
   },
 ];

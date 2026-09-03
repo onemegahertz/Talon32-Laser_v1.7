@@ -2557,6 +2557,51 @@ void setupWeb() {
   server.begin();
 }
 
+// ==================== SERIAL-ДИАГНОСТИКА ======================
+/* Полная самодиагностика в Монитор порта (115200). Дублирует LCD-самотест,
+ * чтобы система была отлаживаема даже при неисправном/неподключённом LCD. */
+void serialSelfTest(bool rfidOk, byte rfidVer) {
+  Serial.println();
+  Serial.println(F("=================================================="));
+  Serial.print(F("  TALON-32 v")); Serial.print(FW_VERSION);
+  Serial.print(F("  ·  ")); Serial.print(placeName());
+  Serial.print(F("  ·  uptime ")); Serial.print(millis() / 1000); Serial.println(F(" s"));
+  Serial.println(F("=================================================="));
+
+  // --- Шина I2C: сканируем адреса (LCD-переходник 0x27/0x3F, DS3231 0x68) ---
+  Serial.println(F("[I2C] Сканирование шины (SDA=21 SCL=22)..."));
+  int found = 0;
+  for (uint8_t addr = 8; addr < 120; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      found++;
+      Serial.print(F("[I2C] НАЙДЕНО устройство 0x"));
+      if (addr < 16) Serial.print('0');
+      Serial.print(addr, HEX);
+      if (addr == 0x68) Serial.print(F("  -> RTC DS3231"));
+      else if (addr == 0x27 || addr == 0x3F) Serial.print(F("  -> LCD I2C-переходник"));
+      Serial.println();
+    }
+  }
+  if (!found) Serial.println(F("[I2C] НИЧЕГО НЕ НАЙДЕНО! Проверьте SDA/SCL, питание и подтяжки."));
+  Serial.print(F("[LCD] "));  Serial.println(g_lcdOk ? F("OK (hd44780 инициализирован)") : F("НЕ ИНИЦИАЛИЗИРОВАН"));
+  Serial.print(F("[RTC] "));  Serial.println(g_rtcOk ? F("OK (DS3231, батарейка в норме)") : F("НЕТ (батарейка села/отсутствует или модуль не отвечает)"));
+
+  // --- RC522 ---
+  Serial.print(F("[RFID] RC522 VersionReg = 0x"));
+  if (rfidVer < 16) Serial.print('0');
+  Serial.print(rfidVer, HEX);
+  Serial.println(rfidOk ? F("  -> OK") : F("  -> НЕ ОТВЕЧАЕТ (0x00/0xFF). Проверьте SPI 18/19/23, CS=5, питание 3.3V!"));
+
+  // --- Ethernet ---
+  Serial.print(F("[ETH ] W5500: "));
+  if (!g_ethStarted) Serial.println(F("драйвер не запущен (режим «Только Wi-Fi»)"));
+  else Serial.println(ETH.linkUp() ? F("линк ЕСТЬ") : F("линка НЕТ (кабель не подключён — это нормально, будет фолбэк на Wi-Fi)"));
+
+  Serial.println(F("=================================================="));
+}
+
 // ========================= SETUP =============================
 void setup() {
   Serial.begin(115200);
@@ -2636,6 +2681,8 @@ void setup() {
     lcd.print(" E:"); lcd.print(g_ethStarted ? (ETH.linkUp() ? "OK" : "..") : "off");
   }
   delay(1500);
+
+  serialSelfTest(rfidOk, ver);       // полная диагностика в Монитор порта
 
   loadCards();
   if (g_now == 0) g_now = nowLocal();
