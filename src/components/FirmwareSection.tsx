@@ -223,7 +223,7 @@ export default function FirmwareSection() {
             <div className="border border-line bg-panel p-5">
               <h3 className="font-display text-xs font-bold uppercase tracking-wider text-snow">Внутри прошивки</h3>
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {["Ethernet W5500 + фолбэк", "Web-панель (пароль)", "WPA2-точка Talon32-Setup", "DHCP / статический IP", "SNTP + DS3231", "HTTP-сверка залов", "Telegram getUpdates", "SMTP2GO e-mail", "JSONL-журнал", "отчёты HTML/CSV/TXT", "режим регистрации 30 с", "антиповтор 3 с"].map((t) => (
+                {["Ethernet W5500 + фолбэк", "Web-панель (пароль)", "WPA2-точка Talon32-Setup", "DHCP / статический IP", "SNTP + DS3231", "HTTP-сверка залов", "Telegram getUpdates", "SMTP2GO e-mail", "JSONL-журнал", "отчёты HTML/CSV/TXT", "режим регистрации 5 с", "антиповтор 3 с"].map((t) => (
                   <span key={t} className="border border-line px-2 py-1 font-mono text-[10px] text-fog">{t}</span>
                 ))}
               </div>

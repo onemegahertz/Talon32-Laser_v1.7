@@ -441,9 +441,9 @@ export default function AdminPanel() {
                 {tab === "cards" && (
                   <div>
                     <div className="flex flex-wrap items-center gap-3">
-                      <button onClick={() => { setRegLeft(30); say("Режим регистрации открыт на 30 секунд — поднесите карту к терминалу"); }}
+                      <button onClick={() => { setRegLeft(5); say("Режим регистрации открыт на 5 секунд — поднесите карту к терминалу"); }}
                         className="btn-phos border border-phos bg-[#123524] px-4 py-2.5 font-mono text-[11px] font-bold uppercase tracking-wider text-phos">
-                        ● Режим регистрации (30 с)
+                        ● Режим регистрации (5 с)
                       </button>
                       <span className="text-[12px] text-fog">Нумерация сквозная (1, 2, 3…) и не зависит от зала. Контроль «одно место за период» — по уникальному UID карты.</span>
                     </div>

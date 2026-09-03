@@ -127,7 +127,7 @@ static const int PIN_BTN_REG   = 33;   // кнопка: режим регист�
 static const uint32_t LASER_GRACE_MS = 20000; // луч выключен после прохода карты, не более 20 с
 static const uint32_t LASER_ALARM_MS = 5000;  // длительность тревоги при нарушении
 static const uint32_t ANTI_REPEAT_MS = 3000;  // окно антиповтора (только гостевые карты)
-static const uint32_t REG_MODE_MS    = 30000; // сервисный режим регистрации карты
+static const uint32_t REG_MODE_MS    = 5000;  // сервисный режим регистрации карты (5 с)
 static const uint32_t SESSION_MS     = 8UL * 3600UL * 1000UL; // сессия админки 8 ч
 
 // ======================= ГЛОБАЛЬНЫЕ ==========================
@@ -977,7 +977,7 @@ void enterRegMode() {
   g_regUntil = millis() + REG_MODE_MS;
   beep(BEEP_REGOK, 3);
   lampOn(0, 2500);
-  lcdShow("РЕГИСТРАЦИЯ 30С", "ПРИЛОЖИ КАРТУ", 30000);
+  lcdShow("РЕГИСТРАЦИЯ 5С", "ПРИЛОЖИ КАРТУ", REG_MODE_MS);
 }
 void regTick() {
   if (g_regUntil && (int32_t)(millis() - g_regUntil) >= 0) {
@@ -1587,7 +1587,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
  </div>
 
  <div class="card hide" id="t-cards">
-  <button class="btn" id="regBtn">Режим регистрации карты (30 с)</button>
+  <button class="btn" id="regBtn">Режим регистрации карты (5 с)</button>
   <span class="mut" id="regInfo" style="margin-left:12px"></span>
   <p class="mut">Поднесите новую карту к считывателю терминала — номер будет выдан автоматически.
   Нумерация сквозная (1, 2, 3…) и не зависит от зала. Контроль «одно место за период» идёт по

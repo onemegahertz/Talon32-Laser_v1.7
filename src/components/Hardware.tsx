@@ -190,7 +190,7 @@ export default function Hardware() {
                 <Box x={30} y={250} w={230} h={86} title="RTC DS3231" color={GROUPS.I2C.color} active={active === "I2C"} onHover={(g) => setActive(g ?? null)}
                   lines={["SDA/SCL — та же шина I2C", "VCC → 3V3 · GND + батарейка"]} />
                 <Box x={30} y={392} w={230} h={66} title="Кнопка регистрации" color={GROUPS.Управление.color} active={active === "Управление"} onHover={(g) => setActive(g ?? null)}
-                  lines={["GPIO33 → кнопка → GND", "режим выдачи карт 30 с"]} />
+                  lines={["GPIO33 → кнопка → GND", "режим выдачи карт 5 с"]} />
                 <Box x={30} y={470} w={230} h={110} title="Ethernet W5500 (новое)" color={GROUPS.Ethernet.color} active={active === "Ethernet"} onHover={(g) => setActive(g ?? null)}
                   lines={["SCK → GPIO17 · MOSI → GPIO16", "MISO → GPIO12 · CS → GPIO15", "3.3V + GND · RJ-45 → роутер", "RST/INT не нужны (бортовой сброс)"]} />
 
