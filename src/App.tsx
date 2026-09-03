@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DOCS, type DocMeta } from "./data/documents";
+import { BLINK_CODES, DOCS, type DocMeta } from "./data/documents";
+import { FIRMWARE_CODE, FIRMWARE_FILE } from "./data/firmware";
 
 /* ------------------------------------------------------------------ */
 /*  Иконки (inline SVG, без внешних библиотек)                          */
@@ -75,7 +76,27 @@ const ACCENT = {
   amber: { text: "text-amber", border: "border-amber/50", bg: "bg-amber", glow: "rgba(255,179,71,0.35)" },
   cyan: { text: "text-cyan", border: "border-cyan/50", bg: "bg-cyan", glow: "rgba(86,215,232,0.35)" },
   red: { text: "text-red", border: "border-red/50", bg: "bg-red", glow: "rgba(255,107,107,0.35)" },
+  green: { text: "text-green", border: "border-green/50", bg: "bg-green", glow: "rgba(76,224,143,0.35)" },
+  blue: { text: "text-blue", border: "border-blue/50", bg: "bg-blue", glow: "rgba(110,168,255,0.35)" },
+  lime: { text: "text-lime", border: "border-lime/50", bg: "bg-lime", glow: "rgba(183,224,90,0.35)" },
 } as const;
+
+/* Быстрый доступ к ключевым документам комплекта */
+const GUIDE = DOCS.find((d) => d.key === "guide") as DocMeta;
+const WIRING = DOCS.find((d) => d.key === "wiring") as DocMeta;
+
+/* Основной скетч v2.0 — первый документ в комплекте */
+const FIRMWARE_DOC: DocMeta = {
+  key: "firmware",
+  file: FIRMWARE_FILE,
+  title: "Основная прошивка v2.0 «Рубеж»",
+  subtitle:
+    "Единый скетч для всех трёх терминалов: раздельный вход администратор/оператор, самотест с кодами миганий, " +
+    "«ЗАПИСЬ: УДАЧА/НЕУДАЧА», «пип» при поднесении карты, Ethernet W5500 + Wi-Fi + WPA2-точка.",
+  accent: "amber",
+  text: FIRMWARE_CODE,
+  points: ["Arduino Core 3.x", "самотест устройств", "2 роли доступа"],
+};
 
 /* ------------------------------------------------------------------ */
 /*  Утилиты                                                             */
@@ -405,11 +426,10 @@ function TitleBlock() {
   return (
     <div className="border-2 border-line2 bg-panel/70 shadow-[0_18px_50px_rgba(3,8,20,0.55)] backdrop-blur-sm">
       <div className="grid grid-cols-[1.4fr_1fr] border-b border-line">
-        <div className={cell + " border-r"}>
-          <div className={label}>Обозначение</div>
-          <div className={value}>ТАЛОН32.30.00.000</div>
-        </div>
-        <div className={cell}>
+          <div className={cell + " border-r"}>
+            <div className={label}>Обозначение</div>
+            <div className={value}>ТЛН32-РУБЕЖ.20.00.000</div>
+          </div>        <div className={cell}>
           <div className={label}>Формат</div>
           <div className={value}>A4</div>
         </div>
@@ -418,7 +438,7 @@ function TitleBlock() {
         <div className={cell}>
           <div className={label}>Наименование</div>
           <div className="font-body text-[13px] font-semibold leading-snug text-snow">
-            Система RFID-учёта посетителей. Документация для сборки (3 терминала)
+            Система RFID-учёта посетителей «Талон 32 v2.0 Рубеж». Комплект документации для сборки (3 терминала)
           </div>
         </div>
       </div>
@@ -453,13 +473,104 @@ function TitleBlock() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Коды миганий самотеста (v2.0) — интерактивная таблица               */
+/* ------------------------------------------------------------------ */
+function BlinkCodeRow({ code, device, note }: { code: string; device: string; note: string }) {
+  const [blinking, setBlinking] = useState(false);
+  const n = parseInt(code, 10);
+  const timers = useRef<number[]>([]);
+  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
+
+  const demo = () => {
+    if (blinking) return;
+    setBlinking(true);
+    for (let i = 0; i < n; i++) {
+      timers.current.push(window.setTimeout(() => setBlinking(true), i * 850));
+    }
+    timers.current.push(window.setTimeout(() => setBlinking(false), n * 850 + 200));
+  };
+
+  /* LED мигает внутри своего цикла: включён 500 мс из 850 */
+  return (
+    <button
+      onClick={demo}
+      className="group grid w-full grid-cols-[52px_1fr] items-center gap-x-4 border border-line bg-panel/50 px-4 py-3 text-left transition-all duration-200 hover:border-red/60 hover:bg-panel sm:grid-cols-[52px_240px_1fr] sm:gap-x-6"
+      title="Нажмите, чтобы увидеть, как мигает красная лампа"
+    >
+      <span className="font-display text-2xl font-black leading-none text-red/90">{code}</span>
+      <span className="flex items-center gap-3">
+        <BlinkLed on={blinking} cycles={n} />
+        <span className="font-body text-[13.5px] font-bold text-snow">{device}</span>
+      </span>
+      <span className="col-span-2 mt-1 font-mono text-[11px] leading-relaxed text-fog sm:col-span-1 sm:mt-0">{note}</span>
+    </button>
+  );
+}
+
+function BlinkLed({ on, cycles }: { on: boolean; cycles: number }) {
+  const [lit, setLit] = useState(false);
+  useEffect(() => {
+    if (!on) {
+      setLit(false);
+      return;
+    }
+    let i = 0;
+    setLit(true);
+    const iv = window.setInterval(() => {
+      i++;
+      if (i >= cycles * 2) {
+        window.clearInterval(iv);
+        setLit(false);
+        return;
+      }
+      setLit((v) => !v);
+    }, 500);
+    return () => window.clearInterval(iv);
+  }, [on, cycles]);
+  return (
+    <span className="relative flex h-3.5 w-3.5 flex-none items-center justify-center">
+      {lit && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red opacity-60" />}
+      <span
+        className={
+          "relative inline-flex h-3 w-3 rounded-full border transition-colors duration-150 " +
+          (lit ? "border-red bg-red shadow-[0_0_14px_rgba(255,107,107,0.9)]" : "border-red/40 bg-red/15")
+        }
+      />
+    </span>
+  );
+}
+
+function BlinkCodesSection() {
+  return (
+    <FadeIn delay={80}>
+      <div className="mb-5 flex flex-wrap items-end gap-x-6 gap-y-3">
+        <span className="font-display text-4xl font-black leading-none text-red sm:text-5xl">ST</span>
+        <div>
+          <h2 className="font-display text-xl font-bold text-snow sm:text-2xl">Самотест при включении</h2>
+          <p className="mt-1.5 max-w-2xl text-[13.5px] leading-relaxed text-fog">
+            При старте терминал проверяет все устройства. Всё исправно — buzzer подаёт{" "}
+            <span className="font-semibold text-green">три коротких сигнала</span>. Если узел не работает — на дисплее
+            предупреждение, а красная лампа мигает код из таблицы. Нажмите на строку — увидите, как это выглядит.
+          </p>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {BLINK_CODES.map((b) => (
+          <BlinkCodeRow key={b.code} {...b} />
+        ))}
+      </div>
+    </FadeIn>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Лента порядка сборки                                                */
 /* ------------------------------------------------------------------ */
 const STEPS = [
   ["Закупить", "по ведомости комплектующих, пересчёт ×3 уже сделан"],
   ["Собрать", "по монтажной схеме: SPI-шины раздельно, I2C одна"],
-  ["Проверить", "диагностическим скетчем через Монитор порта"],
-  ["Прошить", "Talon32.ino и назначить роль: ресепшен / столовая / ресторан"],
+  ["Прошить", "Talon32_Rubezh.ino на все три платы (Arduino Core 3.x)"],
+  ["Запустить", "самотест мигнёт коды сбоев; роли — кнопкой 1,5 с или в панели"],
 ];
 
 function FlowStrip() {
@@ -497,8 +608,14 @@ function FlowStrip() {
 export default function App() {
   const [modal, setModal] = useState<DocMeta | null>(null);
 
+  /* Порядок комплекта: прошивка -> схема -> комплектующие -> библиотеки -> инструкция -> диагностика */
+  const ALL_DOCS = useMemo<DocMeta[]>(() => {
+    const by = (k: DocMeta["key"]) => DOCS.find((d) => d.key === k) as DocMeta;
+    return [FIRMWARE_DOC, by("wiring"), by("bom"), by("libs"), by("guide"), by("diag")];
+  }, []);
+
   const downloadAll = () => {
-    DOCS.forEach((d, i) => {
+    ALL_DOCS.forEach((d, i) => {
       setTimeout(() => downloadText(d.file, d.text), i * 400);
     });
   };
@@ -520,9 +637,9 @@ export default function App() {
               <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green" />
             </span>
             <span className="font-display text-sm font-extrabold tracking-wide text-snow">
-              ТАЛОН-32<span className="text-amber">·32</span>
+              ТАЛОН 32<span className="text-amber"> · РУБЕЖ</span>
             </span>
-            <span className="border border-line bg-panel/70 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fog">v1.7</span>
+            <span className="border border-line bg-panel/70 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fog">v2.0</span>
           </div>
           <span className="ml-auto hidden font-mono text-[10.5px] uppercase tracking-wider text-mist md:block">
             Ресепшен · Столовая · Ресторан
@@ -532,7 +649,7 @@ export default function App() {
             className="inline-flex items-center gap-2 border border-cyan/70 bg-cyan/10 px-3 py-1.5 font-mono text-[11px] font-semibold text-cyan transition-all duration-200 hover:bg-cyan hover:text-ink hover:shadow-[0_0_24px_rgba(86,215,232,0.35)]"
           >
             {Icon.download}
-            <span className="hidden sm:inline">Все 3 файла</span>
+            <span className="hidden sm:inline">Все 6 файлов</span>
           </button>
         </div>
       </header>
@@ -543,31 +660,37 @@ export default function App() {
           <FadeIn>
             <div className="mb-5 inline-flex items-center gap-2 border border-line bg-panel/60 px-3 py-1.5">
               <span className="text-amber">{Icon.doc}</span>
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-fog">Комплект документации для сборки</span>
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-fog">
+                Комплект сборки · v2.0 «Рубеж»
+              </span>
             </div>
             <h1 className="font-display text-4xl font-black leading-[1.08] text-snow sm:text-5xl">
-              Собрать
+              Три терминала.
               <br />
-              <span className="text-amber">три терминала</span>
+              <span className="text-amber">Один рубеж</span>
               <br />
-              без ошибок.
+              контроля.
             </h1>
             <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-fog">
-              Три готовых файла: что купить (ведомость комплектующих с пересчётом на 3 рабочих места), как соединить
-              (монтажная схема с таблицей GPIO) и чем проверить (диагностический скетч для Монитора порта).
-              Скачивайте, печатайте, держите на верстаке.
+              Полный комплект v2.0: прошивка с самотестом устройств и раздельным входом администратор/оператор,
+              схема соединения, ведомость комплектующих, список библиотек, пошаговая инструкция
+              и диагностический скетч. Всё скачивается текстовыми файлами — печатайте и держите на верстаке.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              {DOCS.map((d, i) => (
-                <FadeIn key={d.key} delay={120 + i * 90}>
-                  <DownloadButton file={d.file} text={d.text} />
-                </FadeIn>
-              ))}
+              <FadeIn delay={120}>
+                <DownloadButton file={FIRMWARE_DOC.file} text={FIRMWARE_DOC.text} />
+              </FadeIn>
+              <FadeIn delay={210}>
+                <DownloadButton file={GUIDE.file} text={GUIDE.text} />
+              </FadeIn>
+              <FadeIn delay={300}>
+                <DownloadButton file={WIRING.file} text={WIRING.text} />
+              </FadeIn>
             </div>
             <div className="mt-8 flex flex-wrap gap-x-8 gap-y-3 font-mono text-[11px] uppercase tracking-wider text-mist">
-              <span><span className="text-green">●</span> 18 позиций</span>
-              <span><span className="text-amber">●</span> 18 GPIO</span>
-              <span><span className="text-cyan">●</span> 6 тестов узлов</span>
+              <span><span className="text-amber">●</span> самотест: 6 кодов миганий</span>
+              <span><span className="text-green">●</span> 2 роли: админ + оператор</span>
+              <span><span className="text-cyan">●</span> 6 файлов комплекта</span>
             </div>
           </FadeIn>
           <FadeIn delay={150}>
@@ -589,9 +712,14 @@ export default function App() {
           </div>
         </FadeIn>
 
-        {/* документы */}
+        {/* самотест: коды миганий красной лампы */}
+        <div className="mt-20">
+          <BlinkCodesSection />
+        </div>
+
+        {/* документы комплекта */}
         <div className="mt-16 space-y-16">
-          {DOCS.map((d, i) => (
+          {ALL_DOCS.map((d, i) => (
             <DocSection key={d.key} doc={d} index={i + 1} delay={80} onOpen={() => setModal(d)} />
           ))}
         </div>
@@ -605,10 +733,10 @@ export default function App() {
       <footer className="relative border-t border-line bg-deep/60">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-5 py-6">
           <span className="font-mono text-[11px] text-mist">
-            Талон-32 v1.7 · RFID-учёт посетителей · {DOCS.map((d) => d.file).join(" + ")}
+            Талон 32 v2.0 «Рубеж» · RFID-учёт посетителей · 6 файлов комплекта
           </span>
           <span className="ml-auto font-mono text-[11px] text-mist">
-            Arduino Core 3.x · ESP32 + RC522 + W5500
+            Arduino Core 3.x · ESP32 + RC522 + W5500 + hd44780 + DS3231
           </span>
         </div>
       </footer>

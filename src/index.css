@@ -18,6 +18,8 @@
   --color-cyan: #56d7e8;
   --color-green: #4ce08f;
   --color-red: #ff6b6b;
+  --color-blue: #6ea8ff;
+  --color-lime: #b7e05a;
 
   --animate-blink: blink 1.6s steps(2, start) infinite;
   --animate-fade-up: fade-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;

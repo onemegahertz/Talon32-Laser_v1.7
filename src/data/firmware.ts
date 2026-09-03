@@ -1,11 +1,12 @@
-// Полный исходник прошивки «Талон-32 v1.7» для ESP32 Dev Module (Arduino Core 3.x).
-// Сборка rev W5500: добавлен Ethernet W5500 (HSPI), драйвер LCD hd44780, WPA2-пароль
-// точки доступа, режимы сети со статическим IP и автофолбэком, исправлен regLeft и
-// «стирание» символов в полях ввода веб-панели. Рабочая логика v1.7 сохранена без изменений.
+// Полный исходник прошивки «Талон 32 v2.0 "Рубеж"» для ESP32 Dev Module (Arduino Core 3.x).
+// v2.0: раздельный вход администратор/оператор, самотест устройств при включении
+// с кодами миганий красной лампы, сигналы «ЗАПИСЬ: УДАЧА/НЕУДАЧА», «пип» при
+// поднесении карты, онлайн-мониторинг залов. База rev W5500 (Ethernet, hd44780,
+// WPA2-точка, статический IP, фикс полей ввода) сохранена полностью.
 // Строка экспортируется как есть (String.raw) для отображения, копирования и скачивания .ino.
 
-export const FIRMWARE_FILE = "Talon32.ino";
-export const FIRMWARE_VERSION = "1.7";
+export const FIRMWARE_FILE = "Talon32_Rubezh.ino";
+export const FIRMWARE_VERSION = "2.0";
 
 /* ============================================================
  *  ЗАЩИТА ОТ СЛУЖЕБНЫХ СИМВОЛОВ (фикс по итогам ревизии).
@@ -26,7 +27,7 @@ function sanitizeFirmware(src: string): string {
 
 export const FIRMWARE_CODE = sanitizeFirmware(String.raw`/*
  * ============================================================
- *  ТАЛОН-32  v1.7  (rev W5500)
+ *  ТАЛОН 32  v2.0  «РУБЕЖ»  (rev W5500)
  *  RFID-учёт посетителей столовой/ресторана
  *  Платформа : ESP32 Dev Module, Arduino Core 3.x (Espressif)
  *  Периферия : RC522 (VSPI 18/19/23), LCD1602 I2C (hd44780,
@@ -74,6 +75,26 @@ export const FIRMWARE_CODE = sanitizeFirmware(String.raw`/*
  *    + regLeft считается БЕЗ max(): сравнение ДО вычитания — нет
  *      ни конфликта макросов, ни unsigned-«заворота» после истечения
  *      таймера; макрос min() из экспоненты повтора AP тоже убран.
+ *
+ *  НОВОЕ В v2.0 «РУБЕЖ»:
+ *    + раздельный вход в веб-панель: АДМИНИСТРАТОР и ОПЕРАТОР.
+ *      Пароль оператора задаёт администратор во вкладке «Система»;
+ *      оператор видит только сводку «сегодня» и НЕ может выдавать
+ *      карты, формировать отчёты и менять настройки;
+ *    + САМОТЕСТ при включении: LCD, RTC, RFID, кнопка, Ethernet.
+ *      Неисправный узел — предупреждение на дисплее и мигания
+ *      КРАСНОЙ лампы по таблице кодов:
+ *        1 длинное — LCD 1602      3 длинных — RFID RC522
+ *        4 — кнопка (GPIO33)       5 — RTC DS3231
+ *        6 — Ethernet W5500 (нет линка, предупреждение)
+ *        7 — buzzer (нет автоконтроля — проверьте тестовый гудок)
+ *      Все узлы исправны — buzzer подаёт ТРИ коротких сигнала;
+ *    + запись карты: «ЗАПИСЬ: УДАЧА» + зелёная лампа + сигнал;
+ *      неудача (карта уже в базе) — «ЗАПИСЬ: НЕУДАЧА», красная
+ *      лампа и ТРИ гудка с интервалом;
+ *    + поднесение любой карты сопровождается коротким «пип»;
+ *    + оптимизация: единая проверка сессий sessionRole(),
+ *      исправлена связка поля «IP других терминалов» с NVS.
  * ============================================================
  */
 
@@ -95,8 +116,8 @@ export const FIRMWARE_CODE = sanitizeFirmware(String.raw`/*
 #include <ArduinoJson.h>
 
 // ====================== КОНФИГУРАЦИЯ =========================
-static const char* FW_VERSION   = "1.7";
-static const char* DEVICE_NAME  = "ТАЛОН-32";
+static const char* FW_VERSION   = "2.0";
+static const char* DEVICE_NAME  = "ТАЛОН-32 РУБЕЖ";
 static const char* AP_SSID      = "Talon32-Setup";   // резервная точка доступа
 static const char* DEFAULT_AP_PASS = "talon3232";    // штатный WPA2-пароль точки (8+ символов)
 static const char* DEFAULT_PASS = "admin";           // пароль админ-панели при первом входе
@@ -160,6 +181,16 @@ uint16_t g_dayReportMin = 1260;          // суточный отчёт в 21:00
 uint16_t g_planGuests = 0;               // план гостей на сегодня (информационный), 0 = не задан
 String   g_operatorCode;                 // код доступа оператора (пусто = режим оператора выключен)
 bool     g_operatorMode = false;         // активен ли сейчас режим оператора (только чтение)
+bool     g_rfidOk = false;               // самотест: отвечает ли RC522
+
+// --- Самотест при включении (v2.0): битовые флаги неисправностей ---
+uint8_t  g_faults = 0;
+static const uint8_t F_LCD  = 0x01;   // код 1 — LCD 1602 (одно длинное мигание)
+static const uint8_t F_RFID = 0x02;   // код 3 — RFID RC522 (три длинных)
+static const uint8_t F_BTN  = 0x04;   // код 4 — кнопка регистрации (GPIO33)
+static const uint8_t F_RTC  = 0x08;   // код 5 — RTC DS3231
+static const uint8_t F_ETH  = 0x10;   // код 6 — Ethernet W5500 (нет линка)
+static const uint8_t F_BUZZ = 0x20;   // код 7 — buzzer (проверяется тестовым гудком)
 
 /* ТРИ рабочих места (rev 3 терминала):
  * 0 = СТОЛОВАЯ  — контроль прохода (одно место за период)
@@ -242,6 +273,7 @@ uint32_t g_beamChg = 0;
 // --- Сессия админ-панели ---
 String   g_token;
 uint32_t g_tokenExp = 0;
+uint8_t  g_tokenRole = 0;   // роль сессии: 0 = нет, 1 = администратор, 2 = оператор
 long     g_tgOffset = 0;
 
 // --- опережающие объявления (порядок секций) ---
@@ -260,12 +292,13 @@ void startPeerPoll();
 // ================== НЕБЛОКИРУЮЩИЙ ЗВУК =======================
 /* Паттерны: пары (вкл, выкл) в мс. Явные паузы гарантируют,
  * что ДВА гудка не сольются в один (исправлено в v1.7).      */
-static const uint16_t BEEP_OK[]    = { 250 };
-static const uint16_t BEEP_ERR[]   = { 160, 110, 160, 110, 420 };
-static const uint16_t BEEP_WARN[]  = { 350, 150, 350 };
-static const uint16_t BEEP_REGOK[] = { 180, 120, 180 };        // два РАЗДЕЛЬНЫХ гудка
-static const uint16_t BEEP_ALARM[] = { 600, 200, 600, 200, 600 };
-static const uint16_t BEEP_BOOT[]  = { 120, 90, 120, 90, 240 };
+static const uint16_t BEEP_OK[]      = { 80, 70, 240 };        // «пип» при поднесении + тон вердикта
+static const uint16_t BEEP_ERR[]     = { 80, 60, 160, 110, 160, 110, 420 }; // «пип» + двойной отказ
+static const uint16_t BEEP_WARN[]    = { 350, 150, 350 };
+static const uint16_t BEEP_REGOK[]   = { 180, 120, 180 };       // ЗАПИСЬ: УДАЧА — два РАЗДЕЛЬНЫХ гудка
+static const uint16_t BEEP_REGFAIL[] = { 130, 130, 130, 130, 130 }; // ЗАПИСЬ: НЕУДАЧА — 3 гудка с интервалом
+static const uint16_t BEEP_ALARM[]   = { 600, 200, 600, 200, 600 };
+static const uint16_t BEEP_BOOT[]    = { 120, 90, 120, 90, 240 }; // мелодия «система готова»
 
 struct Beeper {
   const uint16_t* pat = nullptr;
@@ -1006,9 +1039,11 @@ void denyVerdict(const String& lcd1, const char* ev, const String& uid,
 
 void processReg(const String& uid) {
   if (CardRec* c = findCard(uid)) {
-    if (c->admin) { g_regUntil = 0; lcdShow("СЕРВИС: ВЫХОД", "", 2000); beep(BEEP_OK, 1); return; }
-    lcdShow("УЖЕ В БАЗЕ", "ID " + String(c->id), 2500);
-    beep(BEEP_WARN, 3);
+    if (c->admin) { g_regUntil = 0; lcdShow("СЕРВИС: ВЫХОД", "", 2000); beep(BEEP_OK, 3); return; }
+    /* --- ЗАПИСЬ: НЕУДАЧА — карта уже зарегистрирована (v2.0) --- */
+    lampOn(1, 2500);                                   // КРАСНАЯ лампа
+    beep(BEEP_REGFAIL, 5);                             // три гудка с интервалом
+    lcdShow("ЗАПИСЬ: НЕУДАЧА", "КАРТА УЖЕ ЕСТЬ", 4000);
     return;
   }
   uint32_t id = issueNextId();
@@ -1017,9 +1052,10 @@ void processReg(const String& uid) {
   c.admin = false;
   g_cards.push_back(c);
   saveCards();
-  lampOn(0, 3000);
-  beep(BEEP_REGOK, 3);               // два чётких гудка с паузой
-  lcdShow("КАРТА ЗАПИСАНА", "ГОСТЬ ID " + String(id), 4000);
+  /* --- ЗАПИСЬ: УДАЧА (v2.0) --- */
+  lampOn(0, 3000);                                     // ЗЕЛЁНАЯ лампа
+  beep(BEEP_REGOK, 3);                                 // сигнал успешной записи
+  lcdShow("ЗАПИСЬ: УДАЧА", "ГОСТЬ ID " + String(id), 4000);
   logEvent("CARD_REG", uid, id, c.name, -1);
 }
 
@@ -1046,7 +1082,7 @@ void handleReception(const String& uid) {
 
   // карта известна — показать информацию о госте (мониторинг)
   lampOn(0, 1200);                                    // короткая зелёная: опознан
-  beep(BEEP_OK, 1);
+  beep(BEEP_OK, 3);                                   // «пип» + тон
   lcdShow(c->name.substring(0, 16),
           "ID " + String(c->id) + "  В БАЗЕ", 4000);
   logEvent("SCAN", uid, c->id, c->name, -1);
@@ -1077,7 +1113,7 @@ void handleCard(const String& uid) {
   // --- УСПЕХ: все проверки пройдены, теперь вердикт ---
   logEvent("VISIT", uid, c->id, c->name, (int8_t)p);
   lampOn(0, 3000);                                    // ЗЕЛЁНАЯ
-  beep(BEEP_OK, 1);
+  beep(BEEP_OK, 3);                                   // «пип» + тон допуска
   laserGrace();                                       // луч снят на проход (<= 20 с)
   lcdShow("ДОСТУП РАЗРЕШЁН", String(PERIOD_NAMES[p]) + " " + c->name.substring(0, 7), 4000);
 }
@@ -1460,7 +1496,7 @@ void timeTick() {
 static const char WEBUI[] PROGMEM = R"talonwebui(<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Талон-32 · Админ-панель</title>
+<title>Талон 32 v2.0 «Рубеж» · Терминал</title>
 <style>
 :root{--bg:#0d141b;--p:#121b24;--p2:#0f171f;--ln:#1f2d3a;--tx:#dce7f0;--mut:#8fa5b8;
 --g:#4ce08f;--a:#ffb347;--r:#ff6262;--c:#62c8f7}
@@ -1502,17 +1538,22 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
 </style></head><body><div class="wrap">
 
 <div id="login" class="card">
- <div style="font-size:20px;font-weight:700;margin-bottom:2px">ТАЛОН-32 <span style="color:var(--g);font-family:Consolas,monospace">v1.7</span></div>
- <div class="mut" style="margin-bottom:14px">Админ-панель терминала. Доступ только по паролю.</div>
- <label>Пароль администратора</label>
+ <div style="font-size:20px;font-weight:700;margin-bottom:2px">ТАЛОН 32 <span style="color:var(--g);font-family:Consolas,monospace">v2.0</span> <span style="color:var(--a)">РУБЕЖ</span></div>
+ <div class="mut" style="margin-bottom:12px">Терминал учёта посетителей. Выберите роль и введите пароль.</div>
+ <div style="display:flex;gap:6px;margin-bottom:12px">
+  <button class="btn" id="roleAdmin" type="button" style="margin:0;flex:1;text-align:center">Администратор</button>
+  <button class="btn blue" id="roleOp" type="button" style="margin:0;flex:1;text-align:center">Оператор</button>
+ </div>
+ <label id="lpassLbl">Пароль администратора</label>
  <input type="password" id="lpass" autocomplete="current-password">
  <button class="btn" style="width:100%" id="lbtn">Войти</button>
  <div class="mut" id="lerr" style="color:var(--r);margin-top:8px"></div>
+ <div class="mut" style="margin-top:10px;font-size:11px">Оператор видит только сводку «сегодня» (просмотр, без выдачи карт и настроек). Пароль оператора задаёт администратор: вкладка «Система».</div>
 </div>
 
 <div id="app" class="hide">
  <div class="hd">
-  <b>ТАЛОН-32</b><span class="v">v1.7</span>
+  <b>ТАЛОН 32 · РУБЕЖ</b><span class="v">v2.0</span>
   <span class="chip" id="hPlace">—</span>
   <span class="chip on" id="hTime">--:--:--</span>
   <span class="chip" id="hWifi">Сеть</span>
@@ -1547,6 +1588,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
      <span class="mut" style="font-size:11px">обновляется каждые ~4 с</span>
    </div>
    <div id="dHalls" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
+   <p class="mut" id="dHallsTotal" style="margin:10px 0 0"></p>
    <p class="mut" style="margin:8px 0 0">Ресепшен видит столовую и ресторан в реальном времени; залы видят друг друга.
    IP других терминалов задаются во вкладке «Сеть» через запятую.</p>
   </div>
@@ -1639,7 +1681,7 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><label>Маска подсети</label><input id="eSn" placeholder="255.255.255.0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
   </div>
   <div class="row" style="margin-top:10px">
-   <div><label>IP второго терминала (сверка «одно место за период»)</label><input id="nPeer" placeholder="192.168.1.78" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+   <div><label>IP других терминалов через запятую (сверка + онлайн-мониторинг; ресепшену — оба зала)</label><input id="nPeer" placeholder="192.168.1.78, 192.168.1.79" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
    <div><label>Часовой пояс, минут от UTC (МСК = 180)</label><input id="nTz" type="number"></div>
   </div>
   <div class="row">
@@ -1738,8 +1780,40 @@ function api(p, m, body){
     return r.json();
   });
 }
-function showLogin(){ document.getElementById('app').className='hide';
-  document.getElementById('login').className='card'; }
+/* --- Роли (v2.0): 'admin' = администратор, 'op' = оператор --- */
+var ROLE = 'admin';
+var ivMain = null, ivHalls = null;
+function setRole(r){
+  ROLE = r;
+  document.getElementById('roleAdmin').className = (r === 'admin') ? 'btn' : 'btn blue';
+  document.getElementById('roleOp').className    = (r === 'op')    ? 'btn' : 'btn blue';
+  document.getElementById('lpassLbl').textContent =
+    (r === 'admin') ? 'Пароль администратора' : 'Пароль оператора';
+  document.getElementById('lerr').textContent = '';
+}
+function stopPolls(){
+  if (ivMain)  { clearInterval(ivMain);  ivMain = null; }
+  if (ivHalls) { clearInterval(ivHalls); ivHalls = null; }
+}
+function startPolls(){
+  stopPolls();
+  ivMain = setInterval(function(){
+    if (ROLE === 'admin') {
+      refresh(false);
+      if (document.getElementById('opview').className === '') refreshOpView();
+    } else {
+      refreshOpView();                       // оператор: только сводка «сегодня»
+    }
+  }, 3000);
+  ivHalls = setInterval(function(){ if (ROLE === 'admin') refreshHalls(); }, 4000);
+}
+function showLogin(){
+  stopPolls();
+  setRole('admin');
+  document.getElementById('app').className='hide';
+  document.getElementById('opview').className='hide';
+  document.getElementById('login').className='card';
+}
 function showApp(){ document.getElementById('login').className='hide';
   document.getElementById('app').className=''; }
 
@@ -1797,7 +1871,7 @@ function refresh(full){
       setVal('nTerm', String(j.terminal));
       setVal('nLaser', j.laserInvert ? '1' : '0');
       setVal('nTz', String(j.tz));
-      setVal('nPeer', j.peerIp);
+      setVal('nPeer', j.peers || '');
       setVal('nMode', String(j.netMode));
       setVal('eStatic', j.ethStatic ? '1' : '0');
       setVal('eIp', j.eIp);
@@ -1844,17 +1918,31 @@ function refreshOpView(){
       ? '' : 'Сегодня проходов пока не было.';
   }).catch(function(){});
 }
-/* ---------- счётчик ВТОРОГО зала (столовая/ресторант) ---------- */
-function refreshPeerToday(){
-  if (!S || !S.peerIp) return;
-  api('/api/peertoday').then(function(j){
-    if (j.ok) {
-      document.getElementById('dPeerVisits').textContent = j.visits;
-      document.getElementById('dPeerPlace').textContent = j.place + ' (второй зал)';
-    } else {
-      document.getElementById('dPeerVisits').textContent = '—';
-      document.getElementById('dPeerPlace').textContent = 'второй зал: нет ответа';
+/* ---------- ОНЛАЙН-МОНИТОРИНГ ЗАЛОВ (v2.0): столовая + ресторан ----------
+ * Данные берёт из /api/halls (локальный терминал + фоновой кэш опроса пиров). */
+function refreshHalls(){
+  api('/api/halls').then(function(j){
+    var box = document.getElementById('dHalls');
+    if (!box) return;
+    var total = 0, h = '';
+    for (var i = 0; i < j.halls.length; i++) {
+      var x = j.halls[i];
+      total += x.visits;
+      var mark = x.self ? 'border-color:var(--g)' : (x.seen ? 'border-color:var(--c)' : 'border-color:var(--r)');
+      var st = x.self ? 'ЭТОТ ТЕРМИНАЛ' : (x.seen ? 'НА СВЯЗИ' : 'НЕТ ОТВЕТА');
+      var ip = x.self ? (S ? S.ip : '') : (x.ip || '');
+      h += '<div style="border:1px solid var(--ln);' + mark + ';border-radius:10px;padding:10px 12px;background:var(--p2)">'
+         + '<div class="k" style="display:flex;justify-content:space-between"><span>' + esc(x.place) + '</span></div>'
+         + '<div style="display:flex;gap:16px;margin-top:6px">'
+         + '<div><div class="k">прошло</div><div class="vv g" style="font-size:18px">' + x.visits + '</div></div>'
+         + '<div><div class="k">гостей</div><div class="vv c" style="font-size:18px">' + x.guests + '</div></div>'
+         + '</div>'
+         + '<div class="mut" style="margin-top:6px;font-size:10.5px">' + st + (ip ? ' · ' + esc(ip) : '') + '</div>'
+         + '</div>';
     }
+    box.innerHTML = h;
+    var t = document.getElementById('dHallsTotal');
+    if (t) t.textContent = 'Всего проходов по всем залам: ' + total;
   }).catch(function(){});
 }
 /* ---------- обработчики: план и оператор ---------- */
@@ -1882,20 +1970,47 @@ document.getElementById('opEnter').onclick = function(){
   });
 };
 document.getElementById('opExit').onclick = function(){
+  if (ROLE === 'op') {
+    /* оператор (v2.0): выход = завершение сессии, возврат ко входу */
+    fetch('/api/logout', {method:'POST'}).then(function(){ showLogin(); });
+    return;
+  }
   fetch('/api/operator/logout', {method:'POST'}).then(function(){
     applyOpMode(false); refresh(false);
   });
 };
 
+document.getElementById('roleAdmin').onclick = function(){ setRole('admin'); };
+document.getElementById('roleOp').onclick    = function(){ setRole('op'); };
+
 document.getElementById('lbtn').onclick = function(){
   var p = document.getElementById('lpass').value;
   fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pass:p})}).then(function(r){ return r.json(); }).then(function(j){
-    if (j.ok) { showApp(); refresh(true); refreshPeerToday();
-      setInterval(function(){ refresh(false); if (document.getElementById('opview').className === '') refreshOpView(); }, 3000);
-      setInterval(refreshPeerToday, 15000);
-      loadCards(); }
-    else document.getElementById('lerr').textContent = 'Неверный пароль';
+    body: JSON.stringify({role: ROLE, pass: p})}).then(function(r){ return r.json(); }).then(function(j){
+    if (!j.ok) {
+      document.getElementById('lerr').textContent = (ROLE === 'op')
+        ? 'Неверный пароль оператора (или оператор не настроен администратором)'
+        : 'Неверный пароль';
+      return;
+    }
+    document.getElementById('lpass').value = '';
+    if (j.role === 'op') {
+      /* ОПЕРАТОР (v2.0): сразу сводка «сегодня», без админ-панели */
+      setRole('op');
+      applyOpMode(true);
+      startPolls();
+    } else {
+      /* АДМИНИСТРАТОР: полная панель */
+      setRole('admin');
+      showApp();
+      applyOpMode(false);
+      refresh(true);
+      refreshHalls();
+      startPolls();
+      loadCards();
+    }
+  }).catch(function(){
+    document.getElementById('lerr').textContent = 'Нет ответа от терминала';
   });
 };
 document.getElementById('lout').onclick = function(){
@@ -1974,7 +2089,7 @@ document.getElementById('wSave').onclick = function(){
     alert(j.ok ? 'Сохранено. Идёт переподключение к новой сети...' : 'Ошибка'); });
 };
 document.getElementById('nSave').onclick = function(){
-  api('/api/net', 'POST', {peer: document.getElementById('nPeer').value.trim(),
+  api('/api/net', 'POST', {peers: document.getElementById('nPeer').value.trim(),
     tz: parseInt(document.getElementById('nTz').value, 10),
     terminal: parseInt(document.getElementById('nTerm').value, 10),
     invert: parseInt(document.getElementById('nLaser').value, 10),
@@ -2019,18 +2134,27 @@ refresh(true);
 )talonwebui";
 
 // ---------- хелперы HTTP ----------
-bool authed() {
-  if (!g_token.length()) return false;
-  if ((int32_t)(millis() - g_tokenExp) >= 0) { g_token = ""; return false; }
-  if (!server.hasHeader("Cookie")) return false;
-  return server.header("Cookie").indexOf("sid=" + g_token) >= 0;
+uint8_t sessionRole() {           // 0 = нет сессии, 1 = администратор, 2 = оператор
+  if (!g_token.length()) return 0;
+  if ((int32_t)(millis() - g_tokenExp) >= 0) { g_token = ""; g_tokenRole = 0; return 0; }
+  if (!server.hasHeader("Cookie")) return 0;
+  if (server.header("Cookie").indexOf("sid=" + g_token) < 0) return 0;
+  return g_tokenRole;
 }
+bool authed()    { return sessionRole() == 1; }   // только АДМИНИСТРАТОР
+bool anyAuthed() { return sessionRole() != 0; }   // администратор ИЛИ оператор
 void sendJ(JsonDocument& doc, int code = 200) {
   String s; serializeJson(doc, s);
   server.send(code, "application/json", s);
 }
-bool needAuth() {                 // true = доступ запрещён (ответ уже отправлен)
+bool needAuth() {                 // требуется АДМИН; true = доступ запрещён (ответ отправлен)
   if (authed()) return false;
+  JsonDocument d; d["error"] = "unauthorized";
+  sendJ(d, 401);
+  return true;
+}
+bool needAnyAuth() {              // достаточно ЛЮБОЙ роли; true = доступ запрещён
+  if (anyAuthed()) return false;
   JsonDocument d; d["error"] = "unauthorized";
   sendJ(d, 401);
   return true;
@@ -2050,27 +2174,38 @@ void setupWeb() {
 
   server.on("/api/login", HTTP_POST, []() {
     JsonDocument in; deserializeJson(in, server.arg("plain"));
+    String role = in["role"] | "admin";      // "admin" или "op" (v2.0)
     String pass = in["pass"] | "";
     JsonDocument out;
-    if (pass.length() && pass == g_adminPass) {
+    bool ok = false; uint8_t r = 0;
+    if (role == "op") {
+      // оператор: пароль задаётся админом во вкладке «Система»;
+      // пустой код = вход оператора запрещён
+      if (g_operatorCode.length() && pass.length() && pass == g_operatorCode) { ok = true; r = 2; }
+    } else {
+      if (pass.length() && pass == g_adminPass) { ok = true; r = 1; }
+    }
+    if (ok) {
       g_token = randToken();
+      g_tokenRole = r;
       g_tokenExp = millis() + SESSION_MS;
       server.sendHeader("Set-Cookie", "sid=" + g_token + "; Path=/; HttpOnly");
       out["ok"] = true;
-      logEvent("SYS_LOGIN_OK", "", 0, "", -1);
+      out["role"] = (r == 2) ? "op" : "admin";
+      logEvent((r == 2) ? "SYS_OP_LOGIN" : "SYS_LOGIN_OK", "", 0, "", -1);
     } else {
       out["ok"] = false;
-      logEvent("SYS_LOGIN_BAD", "", 0, "", -1);
+      logEvent("SYS_LOGIN_BAD", "", 0, role, -1);
     }
     sendJ(out);
   });
   server.on("/api/logout", HTTP_POST, []() {
-    g_token = "";
+    g_token = ""; g_tokenRole = 0;
     JsonDocument out; out["ok"] = true; sendJ(out);
   });
 
   server.on("/api/status", HTTP_GET, []() {
-    if (needAuth()) return;
+    if (needAnyAuth()) return;              // доступно и оператору (v2.0)
     JsonDocument j;
     j["v"] = FW_VERSION;
     j["place"] = placeName();
@@ -2140,7 +2275,7 @@ void setupWeb() {
   });
 
   server.on("/api/log", HTTP_GET, []() {
-    if (needAuth()) return;
+    if (needAnyAuth()) return;              // доступно и оператору (v2.0)
     String date = server.arg("date");
     if (date.length() < 10) date = g_dateStr;
     JsonDocument out;
@@ -2386,11 +2521,11 @@ void setupWeb() {
 
   // ---------- ПЛАН ГОСТЕЙ (информационный, сбрасывается сам к началу дня) ----------
   server.on("/api/plan", HTTP_GET, []() {
-    if (needAuth()) return;
+    if (needAnyAuth()) return;              // доступно и оператору (v2.0)
     JsonDocument out; out["plan"] = g_planGuests; sendJ(out);
   });
   server.on("/api/plan", HTTP_POST, []() {
-    if (needAuth()) return;
+    if (needAnyAuth()) return;              // план — информационный, доступен и оператору
     JsonDocument in; deserializeJson(in, server.arg("plain"));
     long v = in["plan"] | -1;
     JsonDocument out;
@@ -2433,7 +2568,7 @@ void setupWeb() {
 
   // Сводка «сегодня» для оператора И админа: счётчики + список гостей.
   server.on("/api/today", HTTP_GET, []() {
-    if (!authed() && !g_operatorMode) {          // оператору сессия админа не нужна
+    if (!anyAuthed() && !g_operatorMode) {       // оператору (v2.0) сессия админа не нужна
       JsonDocument d; d["error"] = "unauthorized"; sendJ(d, 401); return;
     }
     JsonDocument out;
@@ -2486,7 +2621,7 @@ void setupWeb() {
   // фоновой задачи — отдаётся мгновенно, не блокирует чтение карт).
   // Ресепшен видит и столовую, и ресторан; залы видят друг друга.
   server.on("/api/halls", HTTP_GET, []() {
-    if (needAuth()) return;
+    if (needAnyAuth()) return;              // доступно и оператору (v2.0)
     JsonDocument out;
     JsonArray arr = out["halls"].to<JsonArray>();
     // сам терминал
@@ -2602,6 +2737,81 @@ void serialSelfTest(bool rfidOk, byte rfidVer) {
   Serial.println(F("=================================================="));
 }
 
+// ============== САМОТЕСТ ПРИ ВКЛЮЧЕНИИ (v2.0) =================
+/* Таблица кодов мигания КРАСНОЙ лампы:
+ *   1 длинное  — LCD 1602        3 длинных — RFID RC522
+ *   4          — кнопка (GPIO33) 5         — RTC DS3231
+ *   6          — Ethernet W5500 (нет линка; предупреждение)
+ *   7          — buzzer (автоконтроля нет — проверьте тестовый гудок)
+ * Неисправностей может быть несколько: коды мигаются по очереди,
+ * цикл повторяется дважды, список выводится на LCD и в Serial.
+ * Система продолжает загрузку даже при сбоях — чтобы админ мог
+ * зайти в веб-панель и диагностировать терминал дистанционно.   */
+void buzzDirect(uint32_t ms) {
+  digitalWrite(PIN_BUZZER, HIGH); delay(ms); digitalWrite(PIN_BUZZER, LOW);
+}
+uint8_t blinkCodeFor(uint8_t flag) {
+  if (flag == F_LCD)  return 1;
+  if (flag == F_RFID) return 3;
+  if (flag == F_BTN)  return 4;
+  if (flag == F_RTC)  return 5;
+  if (flag == F_ETH)  return 6;
+  if (flag == F_BUZZ) return 7;
+  return 0;
+}
+String faultNames() {
+  String s;
+  if (g_faults & F_LCD)  s += "LCD ";
+  if (g_faults & F_RFID) s += "RFID ";
+  if (g_faults & F_BTN)  s += "КНПК ";
+  if (g_faults & F_RTC)  s += "RTC ";
+  if (g_faults & F_ETH)  s += "ETH ";
+  if (g_faults & F_BUZZ) s += "BZR ";
+  s.trim();
+  return s.length() ? s.substring(0, 16) : String("?");
+}
+void blinkFaults() {
+  for (uint8_t rep = 0; rep < 2; rep++) {              // два полных цикла
+    for (uint8_t b = 0; b < 6; b++) {
+      uint8_t flag = (uint8_t)(1u << b);
+      if (!(g_faults & flag)) continue;
+      uint8_t n = blinkCodeFor(flag);
+      for (uint8_t i = 0; i < n; i++) {
+        digitalWrite(PIN_LED_RED, HIGH); delay(500);   // длинное мигание
+        digitalWrite(PIN_LED_RED, LOW);  delay(350);
+      }
+      delay(900);                                      // пауза между кодами
+    }
+    delay(1200);                                       // пауза между циклами
+  }
+}
+void runSelfTest(bool btnStuck) {
+  g_faults = 0;
+  Serial.println(F("[САМОТЕСТ] проверка подключённых устройств..."));
+  buzzDirect(180); delay(140);              // тестовый гудок: слышно — buzzer жив
+  if (!g_lcdOk)  g_faults |= F_LCD;
+  if (!g_rtcOk)  g_faults |= F_RTC;
+  if (!g_rfidOk) g_faults |= F_RFID;
+  if (btnStuck)  g_faults |= F_BTN;
+  if (g_ethStarted && !ETH.linkUp()) g_faults |= F_ETH;   // предупреждение, не блокирует
+  Serial.print(F("[САМОТЕСТ] LCD:"));  Serial.print(g_lcdOk  ? F("OK") : F("НЕТ"));
+  Serial.print(F("  RTC:"));           Serial.print(g_rtcOk  ? F("OK") : F("НЕТ"));
+  Serial.print(F("  RFID:"));          Serial.print(g_rfidOk ? F("OK") : F("НЕТ"));
+  Serial.print(F("  КНПК:"));          Serial.print(btnStuck ? F("ЗАЛИПЛА") : F("OK"));
+  Serial.print(F("  ETH:"));           Serial.println((g_ethStarted && ETH.linkUp()) ? F("OK") : F("нет линка"));
+  if (g_faults) {
+    lcdShow("САМОТЕСТ: СБОЙ", faultNames(), 9000);       // предупреждение на дисплее
+    logEvent("SYS_SELFTEST_FAIL", "", 0, faultNames(), -1);
+    blinkFaults();                                       // коды миганий красной лампой
+  } else {
+    buzzDirect(140); delay(120);                         // успех: ТРИ коротких гудка
+    buzzDirect(140); delay(120);
+    buzzDirect(140);
+    lcdShow("СИСТЕМА ГОТОВА", "РУБЕЖ v2.0", 3500);
+    logEvent("SYS_SELFTEST_OK", "", 0, "", -1);
+  }
+}
+
 // ========================= SETUP =============================
 void setup() {
   Serial.begin(115200);
@@ -2635,19 +2845,22 @@ void setup() {
   if (g_lcdOk) {
     lcd.backlight();
     lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("ТАЛОН-32 v"); lcd.print(FW_VERSION);
-    lcd.setCursor(0, 1); lcd.print("ЗАПУСК...");
+    lcd.setCursor(0, 0); lcd.print("ТАЛОН 32 v"); lcd.print(FW_VERSION);
+    lcd.setCursor(0, 1); lcd.print("РУБЕЖ: СТАРТ...");
   }
 
-  // Удержание кнопки при старте = смена рабочего места
-  // (по кругу: СТОЛОВАЯ -> РЕСТОРАН -> РЕСЕПШЕН -> СТОЛОВАЯ ...)
+  // Кнопка (v2.0): удержание при старте = смена рабочего места
+  // (по кругу: СТОЛОВАЯ -> РЕСТОРАН -> РЕСЕПШЕН -> СТОЛОВАЯ ...).
+  // Заодно проверяется исправность: если кнопку нажали и НЕ отпустили
+  // за 2 секунды — она залипла/замкнута (код 4 в самотесте).
   uint32_t bt0 = millis();
-  bool held = true;
+  bool btnSeen = false;
   while ((uint32_t)(millis() - bt0) < 1500) {
-    if (digitalRead(PIN_BTN_REG) != LOW) { held = false; break; }
+    if (digitalRead(PIN_BTN_REG) == LOW) btnSeen = true;
     delay(20);
   }
-  if (held) {
+  bool btnStuck = false;
+  if (btnSeen && digitalRead(PIN_BTN_REG) == LOW) {
     g_terminal = (g_terminal + 1) % 3;            // 0 -> 1 -> 2 -> 0
     prefs.putUChar("terminal", g_terminal);
     if (g_lcdOk) {
@@ -2655,7 +2868,13 @@ void setup() {
       lcd.setCursor(0, 0); lcd.print(isReception() ? "РЕЖИМ:" : "ЗАЛ ИЗМЕНЁН:");
       lcd.setCursor(0, 1); lcd.print(placeName());
     }
-    delay(1800);
+    uint32_t rt0 = millis();
+    while ((uint32_t)(millis() - rt0) < 2000) {   // ждём отпускания кнопки
+      if (digitalRead(PIN_BTN_REG) != LOW) break;
+      delay(20);
+    }
+    if (digitalRead(PIN_BTN_REG) == LOW) btnStuck = true;
+    delay(1200);
   }
 
   // RTC DS3231
@@ -2670,19 +2889,10 @@ void setup() {
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
   rfid.PCD_Init();
   byte ver = rfid.PCD_ReadRegister(rfid.VersionReg);
-  bool rfidOk = (ver != 0x00 && ver != 0xFF);
+  g_rfidOk = (ver != 0x00 && ver != 0xFF);
 
-  if (g_lcdOk) {
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("САМОТЕСТ");
-    lcd.setCursor(0, 1);
-    lcd.print("R:"); lcd.print(g_rtcOk ? "OK" : "--");
-    lcd.print(" F:"); lcd.print(rfidOk ? "OK" : "--");
-    lcd.print(" E:"); lcd.print(g_ethStarted ? (ETH.linkUp() ? "OK" : "..") : "off");
-  }
-  delay(1500);
-
-  serialSelfTest(rfidOk, ver);       // полная диагностика в Монитор порта
+  serialSelfTest(g_rfidOk, ver);     // полная диагностика в Монитор порта
+  runSelfTest(btnStuck);             // коды миганий + 3 гудка при успехе (v2.0)
 
   loadCards();
   if (g_now == 0) g_now = nowLocal();
