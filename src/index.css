@@ -76,9 +76,16 @@ body {
   background-size: 24px 24px, 24px 24px, 120px 120px, 120px 120px;
 }
 
-/* появление при скролле */
-.reveal { opacity: 0; transform: translateY(26px); transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1); }
-.reveal.is-shown { opacity: 1; transform: translateY(0); }
+/* Появление при монтировании. Ключевое: контент НЕ скрывается заранее —
+   анимация стартует из прозрачного состояния и завершается показом,
+   а при отключённых анимациях блок просто виден сразу. Никаких
+   IntersectionObserver-зависимостей: предпросмотр видим всегда. */
+.fade-in { animation: fade-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in { animation: none; }
+  .animate-scan, .animate-ping, .animate-pulse-soft { animation: none; }
+}
 
 /* страховка: если скрипты недоступны/заблокированы — контент показываем всегда,
    чтобы предпросмотр никогда не оставался пустым */

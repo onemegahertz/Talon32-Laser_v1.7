@@ -334,8 +334,10 @@ MFRC522 rfid(PIN_RFID_SS, PIN_RFID_RST);
 int fails = 0;
 
 void hdr(const char* s) { Serial.println(); Serial.println(s); }
-void ok_(const char* s)  { Serial.print(F("  [OK]   ")); Serial.println(s); }
-void bad(const char* s)  { Serial.print(F("  [FAIL] ")); Serial.println(s); fails++; }
+/* ВАЖНО: параметры — const String& (а не const char*), иначе Arduino IDE
+   не скомпилирует вызовы вида ok_("текст " + String(n)).               */
+void ok_(const String& s) { Serial.print(F("  [OK]   ")); Serial.println(s); }
+void bad(const String& s) { Serial.print(F("  [FAIL] ")); Serial.println(s); fails++; }
 
 // ---------- 1. Шина I2C ----------
 void testI2C() {
@@ -394,9 +396,14 @@ void testRFID() {
   else {
     ok_("RC522 отвечает");
     Serial.println(F("  Поднесите карту к считывателю в течение 5 секунд..."));
+    /* Низкоуровневый API (PICC_RequestA + PICC_Select) — существует в КАЖДОЙ
+       версии библиотеки MFRC522. Обёртки PICC_IsNewCardPresent() в части
+       сборок из Library Manager НЕТ — с ними скетч не компилируется.     */
     uint32_t t0 = millis();
     while ((uint32_t)(millis() - t0) < 5000) {
-      if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+      byte atqa[2]; byte atqaLen = sizeof(atqa);
+      if (rfid.PICC_RequestA(atqa, &atqaLen) == MFRC522::STATUS_OK &&
+          rfid.PICC_Select(&rfid.uid) == MFRC522::STATUS_OK) {
         String uid;
         for (byte i = 0; i < rfid.uid.size; i++) {
           if (rfid.uid.uidByte[i] < 16) uid += "0";
@@ -405,8 +412,10 @@ void testRFID() {
         uid.toUpperCase();
         ok_("КАРТА СЧИТАНА! UID = " + uid);
         rfid.PICC_HaltA();
+        rfid.PCD_StopCrypto1();
         return;
       }
+      delay(50);
     }
     Serial.println(F("  карта за 5 с не поднесена (или не читается)."));
   }
