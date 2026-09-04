@@ -416,6 +416,216 @@ function DocSection({ doc, index, delay, onOpen }: { doc: DocMeta; index: number
 }
 
 /* ------------------------------------------------------------------ */
+/*  Экранный шрифт: симулятор LCD с точными битмапами из прошивки       */
+/* ------------------------------------------------------------------ */
+type Glyph = number[];
+
+/* 8 CGRAM-значков — ТЕ ЖЕ байты, что в прошивке (lcdInitChars) */
+const CG: Record<string, Glyph> = {
+  Л: [0x07, 0x05, 0x05, 0x05, 0x05, 0x11, 0x11, 0x00],
+  И: [0x11, 0x13, 0x13, 0x15, 0x19, 0x19, 0x11, 0x11],
+  Д: [0x0e, 0x0a, 0x0a, 0x0a, 0x0a, 0x1f, 0x11, 0x00],
+  Я: [0x0f, 0x11, 0x11, 0x0f, 0x05, 0x11, 0x11, 0x00],
+  Ч: [0x11, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x01, 0x00],
+  Ш: [0x15, 0x15, 0x15, 0x15, 0x15, 0x1f, 0x00, 0x00],
+  Ё: [0x0a, 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f],
+  З: [0x0e, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0e, 0x00],
+};
+
+/* Кириллица -> латинские двойники (таблица прошивки lcdMapChar) */
+const LCD_MAP: Record<string, string> = {
+  А: "A", Б: "B", В: "B", Г: "G", Е: "E", Ж: "J", Й: "I", К: "K", М: "M", Н: "H",
+  О: "O", П: "N", Р: "P", С: "C", Т: "T", У: "Y", Ф: "F", Х: "X", Ц: "C", Щ: "W",
+  Ъ: '"', Ы: "Y", Ь: "'", Э: "E", Ю: "U",
+  а: "A", б: "B", в: "B", г: "G", е: "E", ж: "J", й: "I", к: "K", м: "M", н: "H",
+  о: "O", п: "N", р: "P", с: "C", т: "T", у: "Y", ф: "F", х: "X", ц: "C", щ: "W",
+  ъ: '"', ы: "Y", ь: "'", э: "E", ю: "U", є: "E", і: "I", ї: "I",
+};
+
+/* Классический шрифт 5×7 для латиницы, цифр и знаков */
+const F57: Record<string, Glyph> = {
+  A: [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11, 0], B: [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e, 0],
+  C: [0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e, 0], D: [0x1c, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1c, 0],
+  E: [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f, 0], F: [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10, 0],
+  G: [0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f, 0], H: [0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11, 0],
+  I: [0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e, 0], J: [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0c, 0],
+  K: [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11, 0], L: [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f, 0],
+  M: [0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11, 0], N: [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0],
+  O: [0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e, 0], P: [0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10, 0],
+  R: [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11, 0], S: [0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e, 0],
+  T: [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0], U: [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e, 0],
+  V: [0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04, 0], W: [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a, 0],
+  X: [0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11, 0], Y: [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04, 0],
+  Z: [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f, 0],
+  "0": [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e, 0], "1": [0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e, 0],
+  "2": [0x0e, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1f, 0], "3": [0x1f, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0e, 0],
+  "4": [0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02, 0], "5": [0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e, 0],
+  "6": [0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e, 0], "7": [0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08, 0],
+  "8": [0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e, 0], "9": [0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c, 0],
+  " ": [0, 0, 0, 0, 0, 0, 0, 0], ":": [0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00, 0],
+  ".": [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c, 0], "/": [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0],
+  "-": [0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0], "!": [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0],
+  "?": [0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04, 0], "'": [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00, 0],
+  '"': [0x0a, 0x0a, 0x14, 0x00, 0x00, 0x00, 0x00, 0],
+};
+
+/* Символ -> { значок CGRAM } | { латинский глиф } */
+function lcdGlyph(ch: string): { cg: string } | { g: Glyph } {
+  if (CG[ch]) return { cg: ch };
+  const m = LCD_MAP[ch];
+  const lat = m ?? ch;
+  const g = F57[lat] ?? F57[lat.toUpperCase()] ?? F57["?"];
+  return { g };
+}
+
+function DotMatrix({ g, on = "#7dffa8", off = "rgba(125,255,168,0.07)", size = 3, className = "" }: {
+  g: Glyph; on?: string; off?: string; size?: number; className?: string;
+}) {
+  return (
+    <div className={"grid grid-cols-5 " + className} style={{ gap: 1 }}>
+      {g.flatMap((row, r) =>
+        [4, 3, 2, 1, 0].map((bit) => {
+          const lit = (row >> bit) & 1;
+          return (
+            <span
+              key={r * 5 + bit}
+              style={{ width: size, height: size, background: lit ? on : off, boxShadow: lit ? "0 0 4px " + on : "none" }}
+            />
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+const LCD_PHRASES: { label: string; lines: [string, string] }[] = [
+  { label: "Зал", lines: ["СТОЛОВАЯ", "ЛУЧ: ОХРАНА"] },
+  { label: "Допуск", lines: ["ДОСТУП РАЗРЕШЁН", "ОБЕД Гость 12"] },
+  { label: "Запись", lines: ["ЗАПИСЬ: УДАЧА", "ГОСТЬ ID 7"] },
+  { label: "Дашборд", lines: ["СЕГОДНЯ: 12/8Г", "ЗАВТРАК 8:30"] },
+  { label: "Ресепшен", lines: ["РЕСЕПШЕН", "КАРТ В БАЗЕ: 34"] },
+];
+
+function LcdFontSection() {
+  const [pi, setPi] = useState(0);
+  const [hoverCg, setHoverCg] = useState<string | null>(null);
+  const phrase = LCD_PHRASES[pi];
+
+  const cellFor = (ch: string, i: number) => {
+    const r = lcdGlyph(ch);
+    if ("cg" in r) {
+      const active = hoverCg === ch;
+      const dim = hoverCg !== null && !active;
+      return (
+        <div
+          key={i}
+          className={
+            "flex items-center justify-center border transition-all duration-200 " +
+            (active ? "border-amber bg-amber/10" : "border-transparent") +
+            (dim ? " opacity-30" : "")
+          }
+        >
+          <DotMatrix g={CG[ch]} on={active ? "#ffd27d" : "#7dffa8"} size={3} />
+        </div>
+      );
+    }
+    return (
+      <div key={i} className={"flex items-center justify-center border border-transparent transition-opacity duration-200 " + (hoverCg ? "opacity-30" : "")}>
+        <DotMatrix g={r.g} size={3} />
+      </div>
+    );
+  };
+
+  const row = (s: string) => {
+    const chars = Array.from(s).slice(0, 16);
+    while (chars.length < 16) chars.push(" ");
+    return chars;
+  };
+
+  return (
+    <FadeIn delay={80}>
+      <div className="mb-5 flex flex-wrap items-end gap-x-6 gap-y-3">
+        <span className="font-display text-4xl font-black leading-none text-green sm:text-5xl">ЭШ</span>
+        <div>
+          <h2 className="font-display text-xl font-bold text-snow sm:text-2xl">Экранный шрифт · симулятор LCD</h2>
+          <p className="mt-1.5 max-w-2xl text-[13.5px] leading-relaxed text-fog">
+            Точные битмапы из прошивки (эталон LCD_1602_RUS — тот же шрифтовой канон, что в профессиональных
+            блоках-русификаторах). Наведите курсор на знак CGRAM — подсветятся его вхождения на экране.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
+        {/* сам дисплей */}
+        <div className="border-2 border-line2 bg-panel/70 p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {LCD_PHRASES.map((p, i) => (
+              <button
+                key={p.label}
+                onClick={() => setPi(i)}
+                className={
+                  "border px-3 py-1 font-mono text-[11px] font-semibold transition-all duration-200 " +
+                  (i === pi
+                    ? "border-green bg-green/15 text-green"
+                    : "border-line text-fog hover:border-green/50 hover:text-green")
+                }
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="mx-auto max-w-[430px] border-[6px] border-[#1a2b33] bg-[#04140b] p-3 shadow-[inset_0_0_30px_rgba(0,0,0,0.8),0_10px_40px_rgba(0,0,0,0.5)]">
+            <div className="space-y-1.5">
+              <div className="grid gap-[2px]" style={{ gridTemplateColumns: "repeat(16, minmax(0,1fr))" }}>
+                {row(phrase.lines[0]).map(cellFor)}
+              </div>
+              <div className="grid gap-[2px]" style={{ gridTemplateColumns: "repeat(16, minmax(0,1fr))" }}>
+                {row(phrase.lines[1]).map(cellFor)}
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 text-center font-mono text-[10.5px] uppercase tracking-wider text-mist">
+            Так текст выглядит на дисплее с латинским ROM · жёлтым — собственные знаки CGRAM
+          </div>
+        </div>
+
+        {/* знаки CGRAM */}
+        <div className="border border-line bg-panel/50 p-4 sm:p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="h-px w-8 bg-green" />
+            <h3 className="font-display text-sm font-bold uppercase tracking-[0.18em] text-snow">8 знаков CGRAM</h3>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            {Object.entries(CG).map(([ch, g], i) => (
+              <div
+                key={ch}
+                onMouseEnter={() => setHoverCg(ch)}
+                onMouseLeave={() => setHoverCg(null)}
+                className={
+                  "cursor-crosshair border bg-[#04140b] px-2 py-3 text-center transition-all duration-200 " +
+                  (hoverCg === ch ? "border-amber shadow-[0_0_18px_rgba(255,179,71,0.25)]" : "border-line hover:border-green/50")
+                }
+              >
+                <div className="flex justify-center">
+                  <DotMatrix g={g} on={hoverCg === ch ? "#ffd27d" : "#7dffa8"} size={4} />
+                </div>
+                <div className="mt-2 font-display text-sm font-bold text-snow">{ch}</div>
+                <div className="font-mono text-[9.5px] text-mist">CGRAM {i}</div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-[12px] leading-relaxed text-fog">
+            Буквы-двойники <span className="font-mono text-green">А В Е К М Н О Р С Т У Х</span> выводятся латиницей —
+            на глаз неотличимо. Редкие буквы читаются транслитом. Принцип тот же, что в блоке{" "}
+            <span className="font-mono text-cyan">lcd_v2_18 (FLprog)</span>: до 8 уникальных знаков + латиница.
+          </p>
+        </div>
+      </div>
+    </FadeIn>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Чертёжный штамп                                                     */
 /* ------------------------------------------------------------------ */
 function TitleBlock() {
