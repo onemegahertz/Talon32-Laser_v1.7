@@ -735,7 +735,7 @@ void lcdInitChars() {
   /* 8 пользовательских значков 5×8 (бит 4 = левый столбец) */
   static uint8_t GL[8][8] = {
     {0x0E,0x0A,0x0A,0x0A,0x0A,0x11,0x11,0x11},  // Л
-    {0x11,0x13,0x13,0x15,0x19,0x19,0x11,0x11},  // И
+    {0x11,0x19,0x19,0x15,0x13,0x13,0x11,0x11},  // И
     {0x06,0x0A,0x0A,0x0A,0x0A,0x1F,0x1F,0x11},  // Д
     {0x1F,0x11,0x11,0x1F,0x05,0x09,0x11,0x11},  // Я
     {0x11,0x11,0x11,0x1F,0x01,0x01,0x01,0x01},  // Ч
@@ -791,8 +791,10 @@ uint8_t lcdMapChar(uint16_t u) {
 
 /* Вывод строки на LCD: не более 16 экранных символов, на шину идут
  * только чистые байты (ASCII или код значка 0..7). Ограничение по
- * СИМВОЛАМ, а не по байтам — разрез пополам UTF-8 пары исключён.    */
-void lcdPrintSafe(const String& s) {
+ * СИМВОЛАМ, а не по байтам — разрез пополам UTF-8 пары исключён.
+ * Возвращает число напечатанных позиций — вызывающий код добивает
+ * остаток пробелами (перезапись без lcd.clear = без мерцания).      */
+uint8_t lcdPrintSafe(const String& s) {
   const uint8_t* p = (const uint8_t*)s.c_str();
   uint8_t shown = 0;
   while (*p && shown < 16) {
@@ -806,6 +808,7 @@ void lcdPrintSafe(const String& s) {
       lcd.write('?'); shown++; p++;
     }
   }
+  return shown;
 }
 
 void lcdShow(const String& l1, const String& l2, uint32_t ms) {
@@ -866,14 +869,30 @@ void lcdDraw() {
         break;
     }
   }
-  // перерисовка ТОЛЬКО при смене контента — иначе мерцание
-  static String prevA = "\x01", prevB;
-  static uint32_t prevOvr = 0;
+  /* ПЕРЕРИСОВКА БЕЗ МЕРЦАНИЯ (фикс v2.0):
+   *  1) lcd.clear() НЕ вызывается — очистка на мгновение гасит ВЕСЬ
+   *     экран, и при обновлении раз в секунду (идут часы) это
+   *     выглядело как заметное мигание;
+   *  2) строка ПЕРЕЗАПИСЫВАЕТСЯ целиком и добивается пробелами до
+   *     16 позиций — старые символы затираются без пустой фазы;
+   *  3) обновляется ТОЛЬКО реально изменившаяся строка;
+   *  4) сам вывод — через псевдокириллицу (читается на любом ROM). */
+  static String prevA = "\x01", prevB = "\x01";
+  static uint32_t prevOvr = 0xFFFFFFFFUL;
   if (a == prevA && b == prevB && g_lcdOvrUntil == prevOvr) return;
+  bool modeChanged = (g_lcdOvrUntil != prevOvr);  // сменился режим overlay
+  String oldA = prevA, oldB = prevB;
   prevA = a; prevB = b; prevOvr = g_lcdOvrUntil;
-  lcd.clear();
-  lcd.setCursor(0, 0); lcdPrintSafe(a);        // псевдокириллица — читается на любом ROM
-  lcd.setCursor(0, 1); lcdPrintSafe(b);
+  if (modeChanged || a != oldA) {
+    lcd.setCursor(0, 0);
+    uint8_t n = lcdPrintSafe(a);
+    for (; n < 16; n++) lcd.write(' ');
+  }
+  if (modeChanged || b != oldB) {
+    lcd.setCursor(0, 1);
+    uint8_t n = lcdPrintSafe(b);
+    for (; n < 16; n++) lcd.write(' ');
+  }
 }
 void lcdTick() {
   static uint32_t last = 0;
