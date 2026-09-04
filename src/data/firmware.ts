@@ -1684,6 +1684,31 @@ padding:9px 16px;cursor:pointer;font-size:14px;font-weight:600;margin-top:12px}
    <div><label>IP других терминалов через запятую (сверка + онлайн-мониторинг; ресепшену — оба зала)</label><input id="nPeer" placeholder="192.168.1.78, 192.168.1.79" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
    <div><label>Часовой пояс, минут от UTC (МСК = 180)</label><input id="nTz" type="number"></div>
   </div>
+  <div style="margin-top:12px;border:1px solid var(--ln);border-radius:10px;padding:12px 14px;background:var(--p2)">
+   <div style="font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--c);margin-bottom:2px">Время и часовой пояс</div>
+   <p class="mut" style="margin:0 0 10px;font-size:11.5px">При подключённом Wi-Fi/Ethernet время берётся из интернета (UTC) и к нему прибавляется часовой пояс. Если время отличается на целое число часов — пояс указан неверно.</p>
+   <div class="row">
+    <div><label>Быстрый выбор города</label><select id="nTzCity">
+     <option value="">— выберите город —</option>
+     <option value="120">Калининград (UTC+2)</option>
+     <option value="180">Москва · СПб · Минск (UTC+3)</option>
+     <option value="240">Самара · Баку (UTC+4)</option>
+     <option value="300">Екатеринбург · Ташкент (UTC+5)</option>
+     <option value="360">Омск · Алматы (UTC+6)</option>
+     <option value="420">Новосибирск (UTC+7)</option>
+     <option value="480">Красноярск (UTC+8)</option>
+     <option value="540">Иркутск (UTC+9)</option>
+     <option value="600">Владивосток (UTC+10)</option>
+     <option value="660">Магадан (UTC+11)</option>
+     <option value="720">Камчатка (UTC+12)</option>
+    </select></div>
+    <div><label>Синхронизация с интернетом</label>
+     <button class="btn blue" id="tSync" type="button" style="margin:0;width:100%">Синхронизировать время сейчас</button>
+    </div>
+   </div>
+   <p class="mut" id="tDiag" style="margin-top:8px;font-family:Consolas,monospace;font-size:11px"></p>
+   <p class="mut" id="tSyncMsg" style="margin-top:4px;color:var(--c)"></p>
+  </div>
   <div class="row">
    <div><label>Рабочее место</label><select id="nTerm"><option value="0">СТОЛОВАЯ (контроль прохода)</option><option value="1">РЕСТОРАН (контроль прохода)</option><option value="2">РЕСЕПШЕН (выдача карт + мониторинг)</option></select></div>
    <div><label>Лазерный приёмник</label><select id="nLaser"><option value="0">Обычный (луч прерван = HIGH)</option><option value="1">Инверсный (луч прерван = LOW)</option></select></div>
@@ -1858,6 +1883,13 @@ function refresh(full){
       'LCD: ' + (j.lcdOk ? 'исправен' : 'НЕ НАЙДЕН (проверьте I2C)') +
       ' · Ethernet-линк: ' + (j.ethLink ? 'есть' : 'нет') +
       ' · Точка доступа: ' + j.apSsid + (j.apPassSet ? ' (WPA2)' : '');
+    /* строка диагностики времени: сразу видно, откуда идут часы */
+    document.getElementById('tDiag').textContent =
+      'Часы терминала: ' + (j.time || 'нет') +
+      ' | UTC из интернета: ' + (j.utcOk ? (j.utcDate + ' ' + j.utcTime) : 'не получено') +
+      ' | SNTP: ' + (j.sntpOk ? 'синхронизирован' : 'НЕТ') +
+      ' | RTC DS3231: ' + (j.rtcOk ? 'в норме' : 'НЕ отвечает (батарейка/модуль)') +
+      ' | пояс: UTC' + (j.tz >= 0 ? '+' : '') + (Math.round(j.tz / 6) / 10);
     if (j.regLeft > 0) document.getElementById('regInfo').textContent = 'идёт регистрация: ' + j.regLeft + ' c';
     else document.getElementById('regInfo').textContent = '';
     if (full) {
@@ -2105,6 +2137,20 @@ document.getElementById('nSave').onclick = function(){
     refresh(false);
   });
 };
+/* --- Время и часовой пояс (v2.0) --- */
+document.getElementById('nTzCity').onchange = function(){
+  if (this.value !== '') document.getElementById('nTz').value = this.value;
+};
+document.getElementById('tSync').onclick = function(){
+  var msg = document.getElementById('tSyncMsg');
+  msg.textContent = 'Запрашиваем время из интернета...';
+  api('/api/time/sync', 'POST', {}).then(function(j){
+    msg.textContent = j.ok
+      ? ('Готово: ' + j.time + '  (UTC ' + j.utc + ', записано в RTC: ' + (j.rtcWritten ? 'да' : 'НЕТ — DS3231 не отвечает') + ')')
+      : ('Не удалось: ' + (j.error || ''));
+    refresh(false);
+  });
+};
 document.getElementById('gSave').onclick = function(){
   api('/api/tg', 'POST', {token: document.getElementById('gTok').value.trim(),
     chat: document.getElementById('gChat').value.trim()}).then(function(j){
@@ -2250,6 +2296,17 @@ void setupWeb() {
     }
     j["dayReport"] = g_dayReportMin;
     j["tz"] = g_tzMin;
+    /* --- Диагностика времени (v2.0): видно, откуда берутся часы --- */
+    j["sntpOk"] = g_sntpOk ? 1 : 0;                    // интернет-время получено
+    j["rtcOk"]  = g_rtcOk ? 1 : 0;                     // DS3231 отвечает
+    {
+      time_t utcNow = time(nullptr);
+      j["utcOk"] = (utcNow > 1700000000) ? 1 : 0;
+      if (utcNow > 1700000000) {
+        j["utcTime"]  = timeStrOf((uint32_t)utcNow);   // чистый UTC из SNTP
+        j["utcDate"]  = dateStrOf((uint32_t)utcNow);
+      }
+    }
     j["laserInvert"] = g_laserInvert ? 1 : 0;
     j["peers"] = g_peerList;                    // список IP других терминалов
     { // статус каждого пира (есть ли связь) — из фонового кэша
@@ -2513,10 +2570,43 @@ void setupWeb() {
     JsonDocument out; out["ok"] = true; sendJ(out);
   });
 
-  server.on("/api/reboot", HTTP_POST, []() {
+  /* --- ПРОВЕРКА И СИНХРОНИЗАЦИЯ ВРЕМЕНИ (v2.0) ---
+   * Берёт время из интернета (SNTP), записывает его в DS3231
+   * и возвращает результат — чтобы админ видел, откуда часы. */
+  server.on("/api/time/sync", HTTP_POST, []() {
     if (needAuth()) return;
-    JsonDocument out; out["ok"] = true; sendJ(out);
-    g_rebootAt = millis() + 800;
+    JsonDocument out;
+    if (!netOnline()) {
+      out["ok"] = false;
+      out["error"] = "нет сети (Wi-Fi/Ethernet не подключены)";
+      sendJ(out); return;
+    }
+    time_t t = time(nullptr);
+    if (t < 1700000000) {
+      // SNTP ещё не ответил — перезапрашиваем и ждём до 4 секунд
+      g_sntpOk = false;
+      configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+      uint32_t t0 = millis();
+      while ((uint32_t)(millis() - t0) < 4000) {
+        if (time(nullptr) > 1700000000) break;
+        delay(150);
+      }
+      t = time(nullptr);
+    }
+    if (t > 1700000000) {
+      g_sntpOk = true;
+      syncRtcFromNet(true);                            // принудительно записываем в RTC
+      uint32_t loc = (uint32_t)t + (uint32_t)(g_tzMin * 60);
+      out["ok"] = true;
+      out["time"] = dateStrOf(loc) + " " + timeStrOf(loc);
+      out["utc"]  = timeStrOf((uint32_t)t);
+      out["rtcWritten"] = g_rtcOk ? 1 : 0;
+      logEvent("SYS_TIME_SYNC", "", 0, out["time"] | "", -1);
+    } else {
+      out["ok"] = false;
+      out["error"] = "NTP-серверы недоступны (проверьте интернет, роутер не должен блокировать UDP 123)";
+    }
+    sendJ(out);
   });
 
   // ---------- ПЛАН ГОСТЕЙ (информационный, сбрасывается сам к началу дня) ----------
