@@ -715,9 +715,102 @@ uint32_t g_lcdOvrUntil = 0;
 uint32_t g_lcdNext = 0;
 uint8_t  g_lcdScreen = 0;
 
+/* ==== ПСЕВДОКИРИЛЛИЦА: читаемый русский на ЛЮБОМ LCD 1602 (фикс v2.0) ====
+ * Симптомы «до»: дата, время, IP, «STA:OK», имя сети видны, а русские
+ * слова — нечитаемые символы. Причина: у многих LCD 1602 ЛАТИНСКИЙ
+ * знакогенератор (ROM A00) — кириллицы в нём просто нет.
+ * Решение полностью программное, дисплей менять не нужно:
+ *  1) 12 букв, неотличимых от латиницы (А В Е К М Н О Р С Т У Х),
+ *     подменяются самой латиницей — подмену не заметит и филолог;
+ *  2) 8 самых частых букв (Л И Д Я Ч Ш Ё З) рисуются своими значками
+ *     в CGRAM — эти 8 ячеек памяти есть в КАЖДОМ HD44780-дисплее;
+ *  3) редкие буквы (Б Г Ж Й Ы …) транслитерируются и читаются по смыслу.
+ * Итог: «СТОЛОВАЯ» выводится как CTO[Л]OBA[Я] и читается как русское
+ * слово; «СЕГОДНЯ» как CEGO[Д]H[Я]; «ЛУЧ» как [Л]Y[Ч]. На LCD с
+ * кириллическим ROM текст остаётся таким же читаемым.              */
+static const uint8_t CG_L = 0, CG_I = 1, CG_D = 2, CG_YA = 3;
+static const uint8_t CG_CH = 4, CG_SH = 5, CG_E2 = 6, CG_Z = 7;
+
+void lcdInitChars() {
+  /* 8 пользовательских значков 5×8 (бит 4 = левый столбец) */
+  static uint8_t GL[8][8] = {
+    {0x0E,0x0A,0x0A,0x0A,0x0A,0x11,0x11,0x11},  // Л
+    {0x11,0x13,0x13,0x15,0x19,0x19,0x11,0x11},  // И
+    {0x06,0x0A,0x0A,0x0A,0x0A,0x1F,0x1F,0x11},  // Д
+    {0x1F,0x11,0x11,0x1F,0x05,0x09,0x11,0x11},  // Я
+    {0x11,0x11,0x11,0x1F,0x01,0x01,0x01,0x01},  // Ч
+    {0x15,0x15,0x15,0x15,0x15,0x15,0x1F,0x1F},  // Ш
+    {0x0A,0x1E,0x10,0x10,0x1E,0x10,0x10,0x1E},  // Ё
+    {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E,0x00},  // З
+  };
+  for (uint8_t i = 0; i < 8; i++) lcd.createChar(i, GL[i]);
+}
+
+/* Один символ (Unicode) -> один байт дисплея: ASCII, значок CGRAM 0..7 */
+uint8_t lcdMapChar(uint16_t u) {
+  if (u == 0x0401 || u == 0x0451) return CG_E2;          // Ё ё
+  uint8_t idx;
+  if      (u >= 0x0410 && u <= 0x042F) idx = u - 0x0410; // А-Я
+  else if (u >= 0x0430 && u <= 0x044F) idx = u - 0x0430; // а-я
+  else return '?';
+  switch (idx) {
+    case 0:  return 'A';    // А
+    case 1:  return 'B';    // Б
+    case 2:  return 'B';    // В
+    case 3:  return 'G';    // Г
+    case 4:  return CG_D;   // Д
+    case 5:  return 'E';    // Е
+    case 6:  return 'J';    // Ж
+    case 7:  return CG_Z;   // З
+    case 8:  return CG_I;   // И
+    case 9:  return 'I';    // Й
+    case 10: return 'K';    // К
+    case 11: return CG_L;   // Л
+    case 12: return 'M';    // М
+    case 13: return 'H';    // Н
+    case 14: return 'O';    // О
+    case 15: return 'N';    // П
+    case 16: return 'P';    // Р
+    case 17: return 'C';    // С
+    case 18: return 'T';    // Т
+    case 19: return 'Y';    // У
+    case 20: return 'F';    // Ф
+    case 21: return 'X';    // Х
+    case 22: return 'C';    // Ц
+    case 23: return CG_CH;  // Ч
+    case 24: return CG_SH;  // Ш
+    case 25: return 'W';    // Щ
+    case 26: return '"';    // Ъ
+    case 27: return 'Y';    // Ы
+    case 28: return 0x27;   // Ь -> '
+    case 29: return 'E';    // Э
+    case 30: return 'U';    // Ю
+    default: return CG_YA;  // Я
+  }
+}
+
+/* Вывод строки на LCD: не более 16 экранных символов, на шину идут
+ * только чистые байты (ASCII или код значка 0..7). Ограничение по
+ * СИМВОЛАМ, а не по байтам — разрез пополам UTF-8 пары исключён.    */
+void lcdPrintSafe(const String& s) {
+  const uint8_t* p = (const uint8_t*)s.c_str();
+  uint8_t shown = 0;
+  while (*p && shown < 16) {
+    uint8_t b = *p;
+    if (b < 0x80) {                     // обычная латиница/цифры
+      lcd.write(b); shown++; p++;
+    } else if ((b & 0xE0) == 0xC0 && p[1]) {   // 2-байтовый UTF-8 (кириллица)
+      uint16_t u = ((uint16_t)(b & 0x1F) << 6) | (p[1] & 0x3F);
+      lcd.write(lcdMapChar(u)); shown++; p += 2;
+    } else {                            // одиночный «потерянный» байт
+      lcd.write('?'); shown++; p++;
+    }
+  }
+}
+
 void lcdShow(const String& l1, const String& l2, uint32_t ms) {
-  g_lcdOvr1 = l1.substring(0, 16);
-  g_lcdOvr2 = l2.substring(0, 16);
+  g_lcdOvr1 = l1;                 // усечение делает lcdPrintSafe — по символам
+  g_lcdOvr2 = l2;
   g_lcdOvrUntil = millis() + ms;
 }
 void lcdDraw() {
@@ -779,8 +872,8 @@ void lcdDraw() {
   if (a == prevA && b == prevB && g_lcdOvrUntil == prevOvr) return;
   prevA = a; prevB = b; prevOvr = g_lcdOvrUntil;
   lcd.clear();
-  lcd.setCursor(0, 0); lcd.print(a.substring(0, 16));
-  lcd.setCursor(0, 1); lcd.print(b.substring(0, 16));
+  lcd.setCursor(0, 0); lcdPrintSafe(a);        // псевдокириллица — читается на любом ROM
+  lcd.setCursor(0, 1); lcdPrintSafe(b);
 }
 void lcdTick() {
   static uint32_t last = 0;
@@ -2943,6 +3036,8 @@ void setup() {
   if (g_lcdOk) {
     lcd.backlight();
     lcd.display();                       // гарантированно включаем дисплей (v2.0)
+    lcdInitChars();                      // ЗАГРУЗКА 8 CGRAM-знаков (Л И Д Я Ч Ш Ё З) —
+                                         // без этого вызова кириллица шла «кракозябрами»
     /* ТЕСТ СТЕКЛА (v2.0): на ~1.5 с заполняем ОБЕ строки сплошными
        блоками (код 0xFF). Это решает проблему «подсветка горит, а
        экран пустой»:
@@ -2956,8 +3051,8 @@ void setup() {
     }
     delay(1500);
     lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("ТАЛОН 32 v"); lcd.print(FW_VERSION);
-    lcd.setCursor(0, 1); lcd.print("РУБЕЖ: СТАРТ...");
+    lcd.setCursor(0, 0); lcdPrintSafe("ТАЛОН 32 v"); lcd.print(FW_VERSION);
+    lcd.setCursor(0, 1); lcdPrintSafe("РУБЕЖ: СТАРТ...");
   }
 
   // Кнопка (v2.0): удержание при старте = смена рабочего места
@@ -2976,8 +3071,8 @@ void setup() {
     prefs.putUChar("terminal", g_terminal);
     if (g_lcdOk) {
       lcd.clear();
-      lcd.setCursor(0, 0); lcd.print(isReception() ? "РЕЖИМ:" : "ЗАЛ ИЗМЕНЁН:");
-      lcd.setCursor(0, 1); lcd.print(placeName());
+      lcd.setCursor(0, 0); lcdPrintSafe(isReception() ? "РЕЖИМ:" : "ЗАЛ ИЗМЕНЁН:");
+      lcd.setCursor(0, 1); lcdPrintSafe(placeName());
     }
     uint32_t rt0 = millis();
     while ((uint32_t)(millis() - rt0) < 2000) {   // ждём отпускания кнопки
