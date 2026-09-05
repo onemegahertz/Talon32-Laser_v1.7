@@ -199,6 +199,65 @@ function DownloadButton({ file, text, compact = false }: { file: string; text: s
   );
 }
 
+/* Большая «прямая ссылка» на прошивку: настоящий <a download>, а не
+   программный клик — такую ссылку видно, можно кликнуть, а можно
+   «Сохранить ссылку как…». Blob создаётся один раз из проверенного
+   исходника FIRMWARE_DOC.text (тот самый, что идёт в сборку).        */
+function FirmwareDirectLink({ file, text }: { file: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+  const url = useMemo(
+    () => URL.createObjectURL(new Blob(["\uFEFF" + text], { type: "text/plain;charset=utf-8" })),
+    [text]
+  );
+  useEffect(() => () => URL.revokeObjectURL(url), [url]);
+  const stats = useMemo(() => textStats(text), [text]);
+  return (
+    <div className="group relative overflow-hidden border-2 border-amber/60 bg-panel/80">
+      <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-amber/10 blur-3xl transition-opacity duration-300 group-hover:opacity-100" />
+      <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center border border-amber/50 bg-amber/10 text-amber">
+          {Icon.download}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-amber">Прошивка · прямая ссылка</div>
+          <div className="mt-1 truncate font-display text-lg font-bold text-snow">{file}</div>
+          <div className="mt-0.5 font-mono text-[11px] text-mist">
+            {stats.lines} строк · {stats.kb} КБ · Arduino Core 3.x · ESP32 Dev Module
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          <a
+            href={url}
+            download={file}
+            rel="noopener"
+            className="inline-flex items-center justify-center gap-2 border border-amber bg-amber px-5 py-2.5 font-mono text-[13px] font-bold text-ink transition-all duration-200 hover:bg-transparent hover:text-amber hover:shadow-[0_0_28px_rgba(255,179,71,0.4)]"
+          >
+            {Icon.download}
+            Скачать .ino
+          </a>
+          <button
+            onClick={async () => {
+              if (await copyText(text)) {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1800);
+              }
+            }}
+            className={
+              "inline-flex items-center justify-center gap-2 border px-5 py-2.5 font-mono text-[13px] font-semibold transition-all duration-200 " +
+              (copied
+                ? "border-green/70 bg-green/15 text-green"
+                : "border-line text-fog hover:border-cyan hover:text-cyan")
+            }
+          >
+            {copied ? Icon.check : Icon.copy}
+            {copied ? "Скопировано" : "Копировать код"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OpenButton({ onOpen, compact = false }: { onOpen: () => void; compact?: boolean }) {
   return (
     <button
@@ -886,16 +945,27 @@ export default function App() {
               схема соединения, ведомость комплектующих, список библиотек, пошаговая инструкция
               и диагностический скетч. Всё скачивается текстовыми файлами — печатайте и держите на верстаке.
             </p>
-            <div className="mt-7 flex flex-wrap items-center gap-3">
+            <div className="mt-7 space-y-3">
               <FadeIn delay={120}>
-                <DownloadButton file={FIRMWARE_DOC.file} text={FIRMWARE_DOC.text} />
+                <FirmwareDirectLink file={FIRMWARE_DOC.file} text={FIRMWARE_DOC.text} />
               </FadeIn>
-              <FadeIn delay={210}>
-                <DownloadButton file={GUIDE.file} text={GUIDE.text} />
-              </FadeIn>
-              <FadeIn delay={300}>
-                <DownloadButton file={WIRING.file} text={WIRING.text} />
-              </FadeIn>
+              <div className="flex flex-wrap items-center gap-3">
+                <FadeIn delay={210}>
+                  <DownloadButton file={GUIDE.file} text={GUIDE.text} />
+                </FadeIn>
+                <FadeIn delay={280}>
+                  <DownloadButton file={WIRING.file} text={WIRING.text} />
+                </FadeIn>
+                <FadeIn delay={350}>
+                  <button
+                    onClick={downloadAll}
+                    className="inline-flex items-center gap-2 border border-line px-5 py-2.5 font-mono text-[13px] font-semibold text-fog transition-all duration-200 hover:border-cyan hover:text-cyan"
+                  >
+                    {Icon.download}
+                    Все 6 файлов
+                  </button>
+                </FadeIn>
+              </div>
             </div>
             <div className="mt-8 flex flex-wrap gap-x-8 gap-y-3 font-mono text-[11px] uppercase tracking-wider text-mist">
               <span><span className="text-amber">●</span> самотест: 6 кодов миганий</span>
