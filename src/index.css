@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Unbounded", "Manrope", system-ui, sans-serif;
+  --font-body: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Consolas", monospace;
+
+  --color-ink: #0a1122;
+  --color-deep: #0d1730;
+  --color-panel: #101d3a;
+  --color-panel2: #13234a;
+  --color-line: #24355c;
+  --color-line2: #2f4470;
+  --color-fog: #93a5c9;
+  --color-mist: #6b7fa6;
+  --color-snow: #eef4ff;
+  --color-amber: #ffb347;
+  --color-cyan: #56d7e8;
+  --color-green: #4ce08f;
+  --color-red: #ff6b6b;
+  --color-blue: #6ea8ff;
+  --color-lime: #b7e05a;
+
+  --animate-blink: blink 1.6s steps(2, start) infinite;
+  --animate-fade-up: fade-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-scan: scan 7s linear infinite;
+  --animate-pulse-soft: pulse-soft 2.6s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0.15; }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(22px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes scan {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(100%); }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-ink);
+  color: var(--color-snow);
+}
+
+body {
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(255, 179, 71, 0.28);
+  color: var(--color-snow);
+}
+
+/* тонкий скроллбар в предпросмотрах */
+.doc-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.doc-scroll::-webkit-scrollbar-track { background: rgba(16, 29, 58, 0.6); }
+.doc-scroll::-webkit-scrollbar-thumb { background: var(--color-line2); border-radius: 8px; }
+.doc-scroll::-webkit-scrollbar-thumb:hover { background: #3b5590; }
+
+/* чертёжная миллиметровка */
+.blueprint-grid {
+  background-image:
+    linear-gradient(rgba(86, 215, 232, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(86, 215, 232, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(86, 215, 232, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(86, 215, 232, 0.09) 1px, transparent 1px);
+  background-size: 24px 24px, 24px 24px, 120px 120px, 120px 120px;
+}
+
+/* Появление при монтировании. Ключевое: контент НЕ скрывается заранее —
+   анимация стартует из прозрачного состояния и завершается показом,
+   а при отключённых анимациях блок просто виден сразу. Никаких
+   IntersectionObserver-зависимостей: предпросмотр видим всегда. */
+.fade-in { animation: fade-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in { animation: none; }
+  .animate-scan, .animate-ping, .animate-pulse-soft { animation: none; }
+}
+
+/* страховка: если скрипты недоступны/заблокированы — контент показываем всегда,
+   чтобы предпросмотр никогда не оставался пустым */
+@media (scripting: none) {
+  .reveal { opacity: 1; transform: none; }
+}
